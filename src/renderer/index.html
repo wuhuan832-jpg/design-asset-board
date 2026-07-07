@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Design Asset Board</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">D</div>
+          <div>
+            <h1>素材板</h1>
+            <p>个人本地设计素材库</p>
+          </div>
+        </div>
+
+        <button class="primary-action" id="openLibraryBtn">创建 / 打开素材库</button>
+
+        <nav class="nav-group">
+          <button class="nav-item active" data-view="all">全部素材 <span id="allCount">0</span></button>
+          <button class="nav-item" data-view="recent">最近导入</button>
+          <button class="nav-item" data-view="favorite">收藏</button>
+        </nav>
+
+        <section class="board-nav">
+          <div class="section-title">
+            <span>画板</span>
+            <button id="newBoardBtn" title="新建画板">+</button>
+          </div>
+          <div id="boardList" class="board-list"></div>
+        </section>
+
+        <div class="library-card">
+          <span>素材库</span>
+          <strong id="libraryPath">未选择</strong>
+          <button id="openImportBtn">打开导入文件夹</button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h2 id="viewTitle">全部素材</h2>
+            <p id="viewSubtitle">把图片复制到导入文件夹，或手动导入图片。</p>
+          </div>
+          <div class="toolbar">
+            <input id="searchInput" type="search" placeholder="搜索文件名" />
+            <select id="sortSelect">
+              <option value="newest">最新导入</option>
+              <option value="largest">尺寸最大</option>
+              <option value="name">文件名</option>
+            </select>
+            <button id="importBtn">导入图片</button>
+          </div>
+        </header>
+
+        <section class="asset-grid" id="assetGrid"></section>
+        <section class="board-stage hidden" id="boardStage">
+          <div class="board-toolbar">
+            <strong id="boardTitle">画板</strong>
+            <span id="boardHint">滚轮缩放，拖拽空白区域平移，从右侧素材加入图片。</span>
+          </div>
+          <div class="infinite-board" id="infiniteBoard">
+            <div class="board-canvas" id="boardCanvas"></div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="inspector">
+        <section class="panel">
+          <h3>当前图片</h3>
+          <div id="assetInfo" class="empty-info">选择一张图片查看信息</div>
+        </section>
+
+        <section class="panel">
+          <h3>快速加入画板</h3>
+          <div id="quickAssetList" class="quick-assets"></div>
+        </section>
+      </aside>
+    </div>
+
+    <div class="viewer hidden" id="viewer">
+      <div class="viewer-topbar">
+        <button id="closeViewerBtn">返回</button>
+        <div class="viewer-actions">
+          <button id="prevBtn">上一张</button>
+          <button id="nextBtn">下一张</button>
+          <button id="fitBtn">适应窗口</button>
+          <button id="actualBtn">原始尺寸</button>
+          <button id="toggleAnnotationsBtn">隐藏批注</button>
+        </div>
+      </div>
+      <div class="viewer-body">
+        <div class="image-plane" id="imagePlane">
+          <img id="viewerImage" alt="" />
+          <canvas id="annotationCanvas"></canvas>
+        </div>
+        <aside class="annotation-tools">
+          <h3>批注</h3>
+          <div class="tool-row">
+            <button class="tool active" data-tool="pen">画笔</button>
+            <button class="tool" data-tool="rect">矩形</button>
+            <button class="tool" data-tool="arrow">箭头</button>
+            <button class="tool" data-tool="text">文字</button>
+          </div>
+          <label>颜色 <input id="colorInput" type="color" value="#ec5b3f" /></label>
+          <label>粗细 <input id="strokeInput" type="range" min="2" max="12" value="4" /></label>
+          <button id="undoBtn">撤销</button>
+          <button id="clearBtn">清除批注</button>
+          <div class="viewer-meta" id="viewerMeta"></div>
+        </aside>
+      </div>
+      <div class="filmstrip" id="filmstrip"></div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

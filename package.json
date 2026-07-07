@@ -1,0 +1,12 @@
+{
+  "name": "design-asset-board",
+  "version": "0.1.0",
+  "description": "Personal Windows app for local design image library, boards, and annotations.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^43.0.0"
+  }
+}

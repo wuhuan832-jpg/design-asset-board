@@ -3,6 +3,7 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const { pathToFileURL } = require("url");
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"]);
 const DEFAULT_STATE = {
@@ -23,6 +24,9 @@ let importWatcher;
 let importing = false;
 
 function createWindow() {
+  const rendererEntry = path.join(__dirname, "renderer", "index.html");
+  const rendererUrl = pathToFileURL(rendererEntry).toString();
+
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -38,7 +42,14 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+  mainWindow.loadFile(rendererEntry);
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== rendererUrl) event.preventDefault();
+  });
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false);
+  });
 }
 
 app.whenReady().then(createWindow);

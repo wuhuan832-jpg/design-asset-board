@@ -70,6 +70,21 @@ function formatDate(value) {
   }).format(new Date(value));
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
+function numberOr(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
 function getAssetsForView() {
   let assets = [...state.library.assets];
   if (state.view === "recent") assets = assets.slice(0, 60);
@@ -119,9 +134,9 @@ function renderNavigation() {
 
   els.boardList.innerHTML = state.library.boards
     .map((board) => `
-      <button class="board-link ${board.id === state.currentBoardId ? "active" : ""}" data-board="${board.id}">
-        <span>${board.name}</span>
-        <small>${board.items.length} 张</small>
+      <button class="board-link ${board.id === state.currentBoardId ? "active" : ""}" data-board="${escapeHtml(board.id)}">
+        <span>${escapeHtml(board.name)}</span>
+        <small>${numberOr(board.items?.length)} 张</small>
       </button>
     `)
     .join("");
@@ -160,12 +175,12 @@ function renderAssetGrid() {
 
   els.assetGrid.innerHTML = assets
     .map((asset) => `
-      <article class="asset-card ${asset.id === state.selectedAssetId ? "selected" : ""}" data-asset="${asset.id}">
-        <button class="favorite ${asset.favorite ? "on" : ""}" data-favorite="${asset.id}" title="收藏">★</button>
-        <div class="thumb"><img src="${asset.url}" alt="${asset.name}" loading="lazy" /></div>
+      <article class="asset-card ${asset.id === state.selectedAssetId ? "selected" : ""}" data-asset="${escapeHtml(asset.id)}">
+        <button class="favorite ${asset.favorite ? "on" : ""}" data-favorite="${escapeHtml(asset.id)}" title="收藏">★</button>
+        <div class="thumb"><img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" loading="lazy" /></div>
         <div class="asset-caption">
-          <strong>${asset.name}</strong>
-          <span>${asset.width || "-"} × ${asset.height || "-"} · ${asset.ext}</span>
+          <strong>${escapeHtml(asset.name)}</strong>
+          <span>${escapeHtml(asset.width || "-")} × ${escapeHtml(asset.height || "-")} · ${escapeHtml(asset.ext)}</span>
         </div>
       </article>
     `)
@@ -178,17 +193,17 @@ function renderInspector() {
     els.assetInfo.innerHTML = `<div class="empty-info">选择一张图片查看信息</div>`;
   } else {
     els.assetInfo.innerHTML = `
-      <div class="preview"><img src="${selected.url}" alt="${selected.name}" /></div>
+      <div class="preview"><img src="${escapeHtml(selected.url)}" alt="${escapeHtml(selected.name)}" /></div>
       <dl>
-        <dt>文件名</dt><dd>${selected.name}</dd>
-        <dt>尺寸</dt><dd>${selected.width || "-"} × ${selected.height || "-"}</dd>
-        <dt>格式</dt><dd>${selected.ext}</dd>
+        <dt>文件名</dt><dd>${escapeHtml(selected.name)}</dd>
+        <dt>尺寸</dt><dd>${escapeHtml(selected.width || "-")} × ${escapeHtml(selected.height || "-")}</dd>
+        <dt>格式</dt><dd>${escapeHtml(selected.ext)}</dd>
         <dt>大小</dt><dd>${formatBytes(selected.bytes)}</dd>
         <dt>导入</dt><dd>${formatDate(selected.importedAt)}</dd>
       </dl>
       <div class="inspector-actions">
-        <button data-open-viewer="${selected.id}">高清查看</button>
-        <button data-reveal="${selected.id}">定位文件</button>
+        <button data-open-viewer="${escapeHtml(selected.id)}">高清查看</button>
+        <button data-reveal="${escapeHtml(selected.id)}">定位文件</button>
       </div>
     `;
   }
@@ -198,9 +213,9 @@ function renderInspector() {
   els.quickAssetList.innerHTML = recentAssets.length
     ? recentAssets
         .map((asset) => `
-          <button class="quick-asset" data-add-to-board="${asset.id}" ${board ? "" : "disabled"}>
-            <img src="${asset.url}" alt="${asset.name}" />
-            <span>${asset.name}</span>
+          <button class="quick-asset" data-add-to-board="${escapeHtml(asset.id)}" ${board ? "" : "disabled"}>
+            <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" />
+            <span>${escapeHtml(asset.name)}</span>
           </button>
         `)
         .join("")
@@ -214,10 +229,13 @@ function renderBoard(board) {
     .map((item) => {
       const asset = getAsset(item.assetId);
       if (!asset) return "";
+      const x = numberOr(item.x);
+      const y = numberOr(item.y);
+      const width = Math.max(80, numberOr(item.width, 260));
       return `
-        <div class="board-item" data-board-item="${item.id}" style="left:${item.x}px; top:${item.y}px; width:${item.width}px;">
-          <img src="${asset.url}" alt="${asset.name}" draggable="false" />
-          <span>${asset.name}</span>
+        <div class="board-item" data-board-item="${escapeHtml(item.id)}" style="left:${x}px; top:${y}px; width:${width}px;">
+          <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />
+          <span>${escapeHtml(asset.name)}</span>
         </div>
       `;
     })
@@ -275,14 +293,14 @@ function renderViewerChrome() {
   const asset = getAsset(state.viewerAssetId);
   if (!asset) return;
   els.viewerMeta.innerHTML = `
-    <strong>${asset.name}</strong>
-    <span>${asset.width || "-"} × ${asset.height || "-"} · ${formatBytes(asset.bytes)}</span>
+    <strong>${escapeHtml(asset.name)}</strong>
+    <span>${escapeHtml(asset.width || "-")} × ${escapeHtml(asset.height || "-")} · ${formatBytes(asset.bytes)}</span>
   `;
   els.toggleAnnotationsBtn.textContent = state.annotationsVisible ? "隐藏批注" : "显示批注";
   els.filmstrip.innerHTML = getAssetsForView()
     .map((item) => `
-      <button class="${item.id === asset.id ? "active" : ""}" data-film="${item.id}">
-        <img src="${item.url}" alt="${item.name}" />
+      <button class="${item.id === asset.id ? "active" : ""}" data-film="${escapeHtml(item.id)}">
+        <img src="${escapeHtml(item.url)}" alt="${escapeHtml(item.name)}" />
       </button>
     `)
     .join("");

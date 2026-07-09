@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Floating Board</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="floating-board-body">
+    <div class="window-titlebar floating-window-titlebar">
+      <span id="floatingBoardTitle">&#x753B;&#x677F;</span>
+      <button id="pinWindowBtn" class="pin-window-btn" title="&#x7F6E;&#x9876;&#x7A97;&#x53E3;" aria-label="&#x7F6E;&#x9876;&#x7A97;&#x53E3;"><svg viewBox="0 0 1024 1024" aria-hidden="true"><path d="M78.165333 971.434667a25.6 25.6 0 0 1-20.48-40.789334L327.68 563.2l-167.253333-166.741333a25.770667 25.770667 0 0 1 0-36.181334c64.170667-64.170667 142.848-73.216 234.496-27.477333l273.066666-151.381333-14.506666-99.498667a25.6 25.6 0 0 1 43.52-21.845333l266.922666 266.922666a25.6 25.6 0 0 1-21.845333 43.52l-99.157333-14.165333-152.064 273.066667c31.573333 68.266667 52.565333 153.6-26.965334 233.813333a25.941333 25.941333 0 0 1-36.352 0l-167.765333-167.936L93.525333 966.314667a25.6 25.6 0 0 1-15.36 5.12z m137.898667-591.872l163.328 163.328a25.941333 25.941333 0 0 1 2.56 33.28L199.168 824.490667l247.808-183.125334a25.6 25.6 0 0 1 33.28 2.389334l164.181333 164.181333c32.597333-44.373333 30.549333-94.890667-5.290666-167.936a25.6 25.6 0 0 1 0-23.552l166.912-300.373333a25.429333 25.429333 0 0 1 25.941333-12.970667l40.618667 5.802667-157.354667-158.037334 5.973333 40.618667a25.770667 25.770667 0 0 1-12.970666 26.112l-300.714667 166.570667a24.746667 24.746667 0 0 1-24.576 0c-67.072-36.693333-120.832-38.4-166.912-4.608z"></path></svg></button>
+    </div>
+    <div class="floating-board-shell">
+      <div class="floating-board-area" id="floatingBoardArea">
+        <div class="board-canvas" id="floatingBoardCanvas"></div>
+      </div>
+      <div class="drop-hint" id="dropHint">
+        <strong>&#x677E;&#x624B;&#x653E;&#x8FDB;&#x753B;&#x677F;</strong>
+        <span>&#x56FE;&#x7247;&#x4F1A;&#x4F5C;&#x4E3A;&#x753B;&#x677F;&#x79C1;&#x6709;&#x7D20;&#x6750;&#xFF0C;&#x4E0D;&#x8FDB;&#x5165;&#x5168;&#x90E8;&#x7D20;&#x6750;&#x3002;</span>
+      </div>
+    </div>
+    <script src="board-window.js"></script>
+  </body>
+</html>

@@ -1,6 +1,8 @@
 node_modules/
 .npm-cache/
 .electron-cache/
+.user-data/
+library/
 *.zip
 
 dist/

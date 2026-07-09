@@ -11,6 +11,9 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <div class="window-titlebar">
+      <span>Design Asset Board</span>
+    </div>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -21,13 +24,20 @@
           </div>
         </div>
 
-        <button class="primary-action" id="openLibraryBtn">创建 / 打开素材库</button>
-
         <nav class="nav-group">
           <button class="nav-item active" data-view="all">全部素材 <span id="allCount">0</span></button>
           <button class="nav-item" data-view="recent">最近导入</button>
           <button class="nav-item" data-view="favorite">收藏</button>
+          <button class="nav-item" data-view="uncategorized">未分类</button>
         </nav>
+
+        <section class="folder-nav">
+          <div class="section-title">
+            <span>软件内文件夹</span>
+            <button id="newFolderBtn" title="新建文件夹">+</button>
+          </div>
+          <div id="folderList" class="folder-list"></div>
+        </section>
 
         <section class="board-nav">
           <div class="section-title">
@@ -38,9 +48,9 @@
         </section>
 
         <div class="library-card">
-          <span>素材库</span>
-          <strong id="libraryPath">未选择</strong>
-          <button id="openImportBtn">打开导入文件夹</button>
+          <span>图片保存方式</span>
+          <strong id="libraryPath">软件自动保存，不需要电脑文件夹整理</strong>
+          <button id="openImportBtn">查看软件内部库</button>
         </div>
       </aside>
 
@@ -48,7 +58,7 @@
         <header class="topbar">
           <div>
             <h2 id="viewTitle">全部素材</h2>
-            <p id="viewSubtitle">把图片复制到导入文件夹，或手动导入图片。</p>
+            <p id="viewSubtitle">直接 Ctrl+V 粘贴图片。软件内文件夹只负责分类。</p>
           </div>
           <div class="toolbar">
             <input id="searchInput" type="search" placeholder="搜索文件名" />
@@ -57,34 +67,34 @@
               <option value="largest">尺寸最大</option>
               <option value="name">文件名</option>
             </select>
-            <button id="importBtn">导入图片</button>
+            <button id="importBtn">备用：选择文件</button>
           </div>
         </header>
 
-        <section class="asset-grid" id="assetGrid"></section>
-        <section class="board-stage hidden" id="boardStage">
-          <div class="board-toolbar">
-            <strong id="boardTitle">画板</strong>
-            <span id="boardHint">滚轮缩放，拖拽空白区域平移，从右侧素材加入图片。</span>
+        <div class="workspace-body">
+          <div class="drop-hint" id="dropHint">
+            <strong>松手放进素材库</strong>
+            <span>图片会保存到软件内部，不会依赖电脑原文件夹。</span>
           </div>
-          <div class="infinite-board" id="infiniteBoard">
-            <div class="board-canvas" id="boardCanvas"></div>
-          </div>
-        </section>
+          <section class="board-dock hidden" id="boardDock">
+            <div class="board-tab-strip" id="boardTabStrip"></div>
+            <div class="board-desktop" id="boardDesktop"></div>
+          </section>
+          <section class="asset-grid" id="assetGrid"></section>
+        </div>
       </main>
 
       <aside class="inspector">
         <section class="panel">
           <h3>当前图片</h3>
-          <div id="assetInfo" class="empty-info">选择一张图片查看信息</div>
-        </section>
-
-        <section class="panel">
-          <h3>快速加入画板</h3>
-          <div id="quickAssetList" class="quick-assets"></div>
+          <div id="assetInfo" class="empty-info">选择一张图片后，这里会显示图片信息。</div>
         </section>
       </aside>
     </div>
+
+    <div class="folder-popover hidden" id="folderPopover"></div>
+    <div class="folder-context-menu hidden" id="folderContextMenu"></div>
+    <div class="folder-context-menu board-context-menu hidden" id="boardContextMenu"></div>
 
     <div class="viewer hidden" id="viewer">
       <div class="viewer-topbar">
@@ -103,7 +113,8 @@
           <canvas id="annotationCanvas"></canvas>
         </div>
         <aside class="annotation-tools">
-          <h3>批注</h3>
+          <h3>注释</h3>
+          <textarea id="viewerNoteInput" class="asset-note-input viewer-note-input" placeholder="添加注释"></textarea>
           <div class="tool-row">
             <button class="tool active" data-tool="pen">画笔</button>
             <button class="tool" data-tool="rect">矩形</button>

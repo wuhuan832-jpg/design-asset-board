@@ -1103,17 +1103,24 @@ els.clearBtn.addEventListener("click", async () => {
   if (confirm("\u6e05\u9664\u5f53\u524d\u56fe\u7247\u7684\u5168\u90e8\u6279\u6ce8\uff1f")) await persistAnnotations([]);
 });
 document.addEventListener("paste", async (event) => {
+  if (event.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
   const files = [...event.clipboardData?.files || []];
   const itemFiles = [...event.clipboardData?.items || []].filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
-  const pastedFiles = files.length ? files : itemFiles;
+  let pastedFiles = files.length ? files : itemFiles;
+  if (!pastedFiles.length) {
+    pastedFiles = (await readClipboardImageFiles()).map((entry) => entry.file);
+  }
+  if (!pastedFiles.length) return;
+
   const board = getBoard(state.activeBoardId);
-  if (board && state.workspaceMode === "boards" && state.openBoardIds.includes(board.id) && pastedFiles.length) {
+  if (board && state.workspaceMode === "boards" && state.openBoardIds.includes(board.id)) {
     event.preventDefault();
     state.internalBoardClipboard = null;
     state.internalBoardClipboardHash = "";
     await importFilesToInternalBoard(board.id, pastedFiles, getInternalBoardPastePoint(board));
     return;
   }
+  event.preventDefault();
   await importBrowserFiles(pastedFiles, "\\u7c98\\u8d34\\u56fe\\u7247");
 });
 

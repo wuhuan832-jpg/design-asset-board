@@ -6,7 +6,8 @@ const crypto = require("crypto");
 const { pathToFileURL } = require("url");
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"]);
-app.setPath("userData", path.join(__dirname, "..", ".user-data"));
+app.setName("素材板");
+if (!app.isPackaged) app.setPath("userData", path.join(__dirname, "..", ".user-data"));
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("disable-gpu");
 app.commandLine.appendSwitch("disable-gpu-sandbox");
@@ -100,7 +101,15 @@ function returnBoardToMain(boardId, win) {
 }
 
 function getDefaultLibraryPath() {
-  return path.join(__dirname, "..", "library");
+  return app.isPackaged
+    ? path.join(app.getPath("userData"), "library")
+    : path.join(__dirname, "..", "library");
+}
+
+function getAppIconPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "app", "build", "icon.ico")
+    : path.join(__dirname, "..", "build", "icon.ico");
 }
 
 function createWindow() {
@@ -112,7 +121,8 @@ function createWindow() {
     height: 920,
     minWidth: 1080,
     minHeight: 720,
-    title: "Design Asset Board",
+    title: "素材板",
+    icon: getAppIconPath(),
     autoHideMenuBar: true,
     titleBarStyle: "hidden",
     backgroundColor: getWindowTheme().background,
@@ -166,6 +176,7 @@ function createBoardWindow(boardId) {
     minWidth: 280,
     minHeight: 320,
     title: board.name,
+    icon: getAppIconPath(),
     alwaysOnTop: false,
     autoHideMenuBar: true,
     titleBarStyle: "hidden",

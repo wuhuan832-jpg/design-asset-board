@@ -22,6 +22,8 @@ function applyFloatingTheme() {
 const state = {
   library: { assets: [], boardAssets: [], boards: [] },
   selectedBoardItemId: "",
+  selectedBoardItemIds: [],
+  boardSelection: null,
   boardInteraction: null,
   boardPanning: false,
   alwaysOnTop: false,
@@ -103,6 +105,48 @@ function boardItemSize(board, item) {
   const width = Math.max(60, Number(item.width) || 260);
   const aspect = asset?.width && asset?.height ? asset.height / asset.width : 0.72;
   return { width, height: Math.max(40, Math.round(width * aspect)) };
+}
+
+function setBoardSelection(ids) {
+  const unique = [...new Set(ids.filter(Boolean))];
+  state.selectedBoardItemIds = unique;
+  state.selectedBoardItemId = unique.at(-1) || "";
+}
+
+function getSelectedBoardItems(board) {
+  if (!board) return [];
+  const selectedIds = state.selectedBoardItemIds.length
+    ? state.selectedBoardItemIds
+    : state.selectedBoardItemId
+      ? [state.selectedBoardItemId]
+      : [];
+  return board.items.filter((item) => selectedIds.includes(item.id));
+}
+
+function normalizeRect(a, b) {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.abs(a.x - b.x),
+    height: Math.abs(a.y - b.y)
+  };
+}
+
+function getBoardItemBounds(board, item) {
+  const size = boardItemSize(board, item);
+  return {
+    x: item.x || 0,
+    y: item.y || 0,
+    width: size.width,
+    height: size.height
+  };
+}
+
+function rectsIntersect(a, b) {
+  return a.x <= b.x + b.width
+    && a.x + a.width >= b.x
+    && a.y <= b.y + b.height
+    && a.y + a.height >= b.y;
 }
 
 function snapBoardItem(board, item, x, y) {
@@ -192,24 +236,45 @@ function render() {
   els.title.textContent = board.name;
   const { x, y, scale } = board.viewport;
   els.canvas.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+  const selectedIds = state.selectedBoardItemIds.length
+    ? state.selectedBoardItemIds
+    : state.selectedBoardItemId
+      ? [state.selectedBoardItemId]
+      : [];
   els.canvas.innerHTML = board.items.map((item) => {
     const asset = getAsset(item.assetId);
     if (!asset) return "";
     const rotation = numberOr(item.rotation);
     const flipX = item.flipX ? -1 : 1;
     const flipY = item.flipY ? -1 : 1;
-    const selected = item.id === state.selectedBoardItemId;
+    const selected = selectedIds.includes(item.id);
+    const singleSelected = selected && selectedIds.length === 1;
     return `
       <div class="board-item ${selected ? "selected" : ""}" data-board-item="${escapeHtml(item.id)}" style="left:${numberOr(item.x)}px; top:${numberOr(item.y)}px; width:${Math.max(60, numberOr(item.width, 260))}px; transform: rotate(${rotation}deg);">
         <div class="board-item-inner" style="transform: scale(${flipX}, ${flipY});">
           <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />
         </div>
-        ${selected ? `<button class="rotate-handle" data-board-handle="rotate"></button>
+        ${singleSelected ? `<button class="rotate-handle" data-board-handle="rotate"></button>
           <button class="resize-handle" data-board-handle="resize"></button>
         ` : ""}
       </div>
     `;
   }).join("");
+  const selection = state.boardSelection;
+  if (selection) {
+    const rect = normalizeRect(selection.start, selection.current);
+    els.area.querySelector(".board-selection-box")?.remove();
+    els.area.insertAdjacentHTML("beforeend", `
+      <div class="board-selection-box" style="
+        left:${rect.x * scale + x}px;
+        top:${rect.y * scale + y}px;
+        width:${rect.width * scale}px;
+        height:${rect.height * scale}px;
+      "></div>
+    `);
+  } else {
+    els.area.querySelector(".board-selection-box")?.remove();
+  }
 }
 
 async function addAssetToBoard(assetId, point) {
@@ -261,32 +326,49 @@ async function updateSelected(updater) {
 
 async function deleteSelected() {
   const board = getBoard();
-  if (!board || !state.selectedBoardItemId) return;
+  const selected = getSelectedBoardItems(board);
+  if (!board || !selected.length) return;
   rememberBoard(board);
-  board.items = board.items.filter((item) => item.id !== state.selectedBoardItemId);
-  state.selectedBoardItemId = "";
+  const selectedIds = new Set(selected.map((item) => item.id));
+  board.items = board.items.filter((item) => !selectedIds.has(item.id));
+  setBoardSelection([]);
   await saveBoard(board);
 }
 
 async function copySelected() {
   const board = getBoard();
-  const item = board?.items.find((entry) => entry.id === state.selectedBoardItemId);
-  if (!item) return;
-  state.boardClipboard = clone(item);
-  const result = await api.writeAssetToClipboard?.(item.assetId);
+  const selected = getSelectedBoardItems(board);
+  if (!selected.length) return;
+  const items = selected.map((item) => clone(item));
+  state.boardClipboard = { items };
+  const result = await api.writeAssetToClipboard?.(items[0].assetId);
   state.boardClipboardHash = result?.hash || "";
+  await api.writeBoardClipboard?.({ items, hash: state.boardClipboardHash });
 }
 
 async function pasteSelected() {
   const board = getBoard();
-  if (!board || !state.boardClipboard) return;
+  if (!board) return;
+  const sharedClipboard = await api.readBoardClipboard?.();
+  const clipboard = state.boardClipboard || sharedClipboard;
+  const sourceItems = Array.isArray(clipboard?.items) ? clipboard.items : clipboard ? [clipboard] : [];
+  if (!sourceItems.length) return;
   rememberBoard(board);
-  const item = { ...clone(state.boardClipboard), id: window.crypto.randomUUID(), x: state.boardClipboard.x + 28, y: state.boardClipboard.y + 28 };
-  board.items.push(item);
-  state.boardClipboard = clone(item);
-  const result = await api.writeAssetToClipboard?.(item.assetId);
+  const minX = Math.min(...sourceItems.map((item) => item.x || 0));
+  const minY = Math.min(...sourceItems.map((item) => item.y || 0));
+  const point = boardPastePoint(board);
+  const pasted = sourceItems.map((source, index) => ({
+    ...clone(source),
+    id: window.crypto.randomUUID(),
+    x: Math.round(point.x + ((source.x || 0) - minX) + 28 + index * 2),
+    y: Math.round(point.y + ((source.y || 0) - minY) + 28 + index * 2)
+  }));
+  board.items.push(...pasted);
+  state.boardClipboard = { items: pasted.map((item) => clone(item)) };
+  const result = await api.writeAssetToClipboard?.(pasted[0].assetId);
   state.boardClipboardHash = result?.hash || state.boardClipboardHash;
-  state.selectedBoardItemId = item.id;
+  await api.writeBoardClipboard?.({ items: state.boardClipboard.items, hash: state.boardClipboardHash });
+  setBoardSelection(pasted.map((item) => item.id));
   await saveBoard(board);
 }
 
@@ -336,7 +418,7 @@ function scheduleBoardPasteFallback() {
 async function undoBoard() {
   const previous = state.boardUndoStack.pop();
   if (!previous) return;
-  state.selectedBoardItemId = "";
+  setBoardSelection([]);
   await saveBoard(previous);
 }
 
@@ -365,7 +447,7 @@ els.area.addEventListener("pointerdown", (event) => {
   const handle = event.target.closest("[data-board-handle]");
   if (event.button === 1) {
     event.preventDefault();
-    state.selectedBoardItemId = "";
+    setBoardSelection([]);
     state.boardPanning = true;
     state.boardPanStart = { x: event.clientX - board.viewport.x, y: event.clientY - board.viewport.y };
     render();
@@ -373,7 +455,16 @@ els.area.addEventListener("pointerdown", (event) => {
   }
   if (itemEl && event.button === 0) {
     const item = board.items.find((entry) => entry.id === itemEl.dataset.boardItem);
-    state.selectedBoardItemId = item.id;
+    const alreadySelected = state.selectedBoardItemIds.includes(item.id);
+    if (event.shiftKey || event.ctrlKey || event.metaKey) {
+      setBoardSelection(alreadySelected
+        ? state.selectedBoardItemIds.filter((id) => id !== item.id)
+        : [...state.selectedBoardItemIds, item.id]);
+    } else if (!alreadySelected) {
+      setBoardSelection([item.id]);
+    } else {
+      setBoardSelection(state.selectedBoardItemIds.length ? state.selectedBoardItemIds : [item.id]);
+    }
     render();
     if (handle?.dataset.boardHandle === "resize") {
       rememberBoard(board);
@@ -387,9 +478,23 @@ els.area.addEventListener("pointerdown", (event) => {
       return;
     }
     rememberBoard(board);
-    state.boardInteraction = { type: "move", item, startX: event.clientX, startY: event.clientY, originX: item.x, originY: item.y };
+    state.boardInteraction = {
+      type: "move",
+      item,
+      items: getSelectedBoardItems(board).map((entry) => ({
+        item: entry,
+        originX: entry.x || 0,
+        originY: entry.y || 0
+      })),
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: item.x,
+      originY: item.y
+    };
   } else if (event.button === 0) {
-    state.selectedBoardItemId = "";
+    const start = screenToBoardPoint(event, board);
+    setBoardSelection([]);
+    state.boardSelection = { start, current: start };
     render();
   }
 });
@@ -408,14 +513,23 @@ window.addEventListener("pointermove", (event) => {
   if (state.boardInteraction && board) {
     const op = state.boardInteraction;
     if (op.type === "move") {
-      const next = snapBoardItem(
-        board,
-        op.item,
-        op.originX + (event.clientX - op.startX) / board.viewport.scale,
-        op.originY + (event.clientY - op.startY) / board.viewport.scale
-      );
-      op.item.x = next.x;
-      op.item.y = next.y;
+      const deltaX = (event.clientX - op.startX) / board.viewport.scale;
+      const deltaY = (event.clientY - op.startY) / board.viewport.scale;
+      if (op.items?.length > 1) {
+        op.items.forEach((entry) => {
+          entry.item.x = Math.round(entry.originX + deltaX);
+          entry.item.y = Math.round(entry.originY + deltaY);
+        });
+      } else {
+        const next = snapBoardItem(
+          board,
+          op.item,
+          op.originX + deltaX,
+          op.originY + deltaY
+        );
+        op.item.x = next.x;
+        op.item.y = next.y;
+      }
     }
     if (op.type === "resize") op.item.width = Math.max(60, Math.round(op.originWidth + (event.clientX - op.startX) / board.viewport.scale));
     if (op.type === "rotate") op.item.rotation = Math.round(Math.atan2(event.clientY - op.centerY, event.clientX - op.centerX) * 180 / Math.PI + 90);
@@ -426,13 +540,24 @@ window.addEventListener("pointermove", (event) => {
     board.viewport.y = event.clientY - state.boardPanStart.y;
     render();
   }
+  if (state.boardSelection && board) {
+    state.boardSelection.current = screenToBoardPoint(event, board);
+    const rect = normalizeRect(state.boardSelection.start, state.boardSelection.current);
+    const selected = board.items
+      .filter((item) => rectsIntersect(rect, getBoardItemBounds(board, item)))
+      .map((item) => item.id);
+    setBoardSelection(selected);
+    render();
+  }
 });
 
 window.addEventListener("pointerup", async () => {
   const board = getBoard();
   if ((state.boardInteraction || state.boardPanning) && board) await api.saveBoard(board);
+  state.boardSelection = null;
   state.boardInteraction = null;
   state.boardPanning = false;
+  render();
 });
 
 document.addEventListener("paste", async (event) => {
@@ -498,6 +623,7 @@ window.addEventListener("keydown", async (event) => {
     return;
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+    scheduleBoardPasteFallback();
     return;
   }
   if (event.key === "Delete" || event.key === "Backspace") {

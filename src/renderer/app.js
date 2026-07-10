@@ -69,6 +69,8 @@ const state = {
   suppressNextPasteEvent: false,
   pendingInternalBoardPasteTimer: 0,
   selectedInternalBoardItemId: "",
+  selectedInternalBoardItemIds: [],
+  internalBoardSelection: null,
   boardTabDrag: null,
   suppressBoardTabClick: false,
   annotationsVisible: true,
@@ -278,7 +280,7 @@ async function detachBoardToFloating(boardId) {
   await api.openFloatingBoard(boardId);
   state.openBoardIds = state.openBoardIds.filter((id) => id !== boardId);
   if (state.activeBoardId === boardId) state.activeBoardId = state.openBoardIds.at(-1) || "";
-  state.selectedInternalBoardItemId = "";
+  setInternalBoardSelection([]);
   state.workspaceMode = "boards";
   render();
 }
@@ -301,7 +303,7 @@ function ensureInternalBoardWindow(boardId) {
 }
 
 function boardPointFromEvent(event, board, boardWindow) {
-  const area = event.target.closest(".internal-board-area, .floating-board-area");
+  const area = event.target.closest(".internal-board-area, .floating-board-area") || getInternalBoardArea(board.id);
   if (!area) return { x: 0, y: 0 };
   const rect = area.getBoundingClientRect();
   return {
@@ -329,6 +331,48 @@ function boardItemSize(board, item) {
   const width = Math.max(60, Number(item.width) || 260);
   const aspect = asset?.width && asset?.height ? asset.height / asset.width : 0.72;
   return { width, height: Math.max(40, Math.round(width * aspect)) };
+}
+
+function setInternalBoardSelection(ids) {
+  const unique = [...new Set(ids.filter(Boolean))];
+  state.selectedInternalBoardItemIds = unique;
+  state.selectedInternalBoardItemId = unique.at(-1) || "";
+}
+
+function getSelectedInternalBoardItems(board) {
+  if (!board) return [];
+  const selectedIds = state.selectedInternalBoardItemIds.length
+    ? state.selectedInternalBoardItemIds
+    : state.selectedInternalBoardItemId
+      ? [state.selectedInternalBoardItemId]
+      : [];
+  return board.items.filter((item) => selectedIds.includes(item.id));
+}
+
+function normalizeRect(a, b) {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.abs(a.x - b.x),
+    height: Math.abs(a.y - b.y)
+  };
+}
+
+function getBoardItemBounds(board, item) {
+  const size = boardItemSize(board, item);
+  return {
+    x: item.x || 0,
+    y: item.y || 0,
+    width: size.width,
+    height: size.height
+  };
+}
+
+function rectsIntersect(a, b) {
+  return a.x <= b.x + b.width
+    && a.x + a.width >= b.x
+    && a.y <= b.y + b.height
+    && a.y + a.height >= b.y;
 }
 
 function snapBoardItem(board, item, x, y) {
@@ -669,14 +713,22 @@ function renderInternalBoards() {
         <div class="board-canvas" style="transform: translate(${board.viewport.x}px, ${board.viewport.y}px) scale(${board.viewport.scale});">
           ${board.items.map((item) => renderBoardItem(item, board.id)).join("")}
         </div>
+        ${renderBoardSelectionBox(board)}
       </div>
     </section>
   `;
 }
+
 function renderBoardItem(item, boardId) {
   const asset = getAsset(item.assetId);
   if (!asset) return "";
-  const selected = state.activeBoardId === boardId && state.selectedInternalBoardItemId === item.id;
+  const selectedIds = state.selectedInternalBoardItemIds.length
+    ? state.selectedInternalBoardItemIds
+    : state.selectedInternalBoardItemId
+      ? [state.selectedInternalBoardItemId]
+      : [];
+  const selected = state.activeBoardId === boardId && selectedIds.includes(item.id);
+  const singleSelected = selected && selectedIds.length === 1;
   const flipX = item.flipX ? -1 : 1;
   const flipY = item.flipY ? -1 : 1;
   return `
@@ -684,10 +736,24 @@ function renderBoardItem(item, boardId) {
       <div class="board-item-inner" style="transform: scale(${flipX}, ${flipY});">
         <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />
       </div>
-      ${selected ? `<button class="rotate-handle" data-board-handle="rotate"></button>
+      ${singleSelected ? `<button class="rotate-handle" data-board-handle="rotate"></button>
         <button class="resize-handle" data-board-handle="resize"></button>
       ` : ""}
     </div>
+  `;
+}
+
+function renderBoardSelectionBox(board) {
+  const selection = state.internalBoardSelection;
+  if (!selection || selection.boardId !== board.id) return "";
+  const rect = normalizeRect(selection.start, selection.current);
+  return `
+    <div class="board-selection-box" style="
+      left:${rect.x * board.viewport.scale + board.viewport.x}px;
+      top:${rect.y * board.viewport.scale + board.viewport.y}px;
+      width:${rect.width * board.viewport.scale}px;
+      height:${rect.height * board.viewport.scale}px;
+    "></div>
   `;
 }
 
@@ -790,7 +856,7 @@ async function createFolder(parentId = "") {
   setLibrary(next);
   state.workspaceMode = "assets";
   state.activeBoardId = "";
-  state.selectedInternalBoardItemId = "";
+  setInternalBoardSelection([]);
   state.currentFolderId = next.folders[0]?.id || "";
   state.view = "all";
   render();
@@ -1027,37 +1093,49 @@ async function updateSelectedInternalBoardItem(updater) {
 
 async function deleteSelectedInternalBoardItem() {
   const board = getBoard(state.activeBoardId);
-  if (!board || !state.selectedInternalBoardItemId) return;
+  const selected = getSelectedInternalBoardItems(board);
+  if (!board || !selected.length) return;
   rememberInternalBoard(board);
-  board.items = board.items.filter((item) => item.id !== state.selectedInternalBoardItemId);
-  state.selectedInternalBoardItemId = "";
+  const selectedIds = new Set(selected.map((item) => item.id));
+  board.items = board.items.filter((item) => !selectedIds.has(item.id));
+  setInternalBoardSelection([]);
   await saveBoard(board);
 }
 
 async function copySelectedInternalBoardItem() {
   const board = getBoard(state.activeBoardId);
-  const item = board?.items.find((entry) => entry.id === state.selectedInternalBoardItemId);
-  if (!item) return;
-  state.internalBoardClipboard = clone(item);
-  const result = await api.writeAssetToClipboard?.(item.assetId);
+  const selected = getSelectedInternalBoardItems(board);
+  if (!selected.length) return;
+  const items = selected.map((item) => clone(item));
+  state.internalBoardClipboard = { items };
+  const result = await api.writeAssetToClipboard?.(items[0].assetId);
   state.internalBoardClipboardHash = result?.hash || "";
+  await api.writeBoardClipboard?.({ items, hash: state.internalBoardClipboardHash });
 }
 
 async function pasteInternalBoardItem() {
   const board = getBoard(state.activeBoardId);
-  if (!board || !state.internalBoardClipboard) return;
+  if (!board) return;
+  const sharedClipboard = await api.readBoardClipboard?.();
+  const clipboard = state.internalBoardClipboard || sharedClipboard;
+  const sourceItems = Array.isArray(clipboard?.items) ? clipboard.items : clipboard ? [clipboard] : [];
+  if (!sourceItems.length) return;
   rememberInternalBoard(board);
-  const item = {
-    ...clone(state.internalBoardClipboard),
+  const minX = Math.min(...sourceItems.map((item) => item.x || 0));
+  const minY = Math.min(...sourceItems.map((item) => item.y || 0));
+  const pastePoint = getInternalBoardPastePoint(board);
+  const pasted = sourceItems.map((source, index) => ({
+    ...clone(source),
     id: window.crypto.randomUUID(),
-    x: state.internalBoardClipboard.x + 28,
-    y: state.internalBoardClipboard.y + 28
-  };
-  board.items.push(item);
-  state.internalBoardClipboard = clone(item);
-  const result = await api.writeAssetToClipboard?.(item.assetId);
+    x: Math.round(pastePoint.x + ((source.x || 0) - minX) + 28 + index * 2),
+    y: Math.round(pastePoint.y + ((source.y || 0) - minY) + 28 + index * 2)
+  }));
+  board.items.push(...pasted);
+  state.internalBoardClipboard = { items: pasted.map((item) => clone(item)) };
+  const result = await api.writeAssetToClipboard?.(pasted[0].assetId);
   state.internalBoardClipboardHash = result?.hash || state.internalBoardClipboardHash;
-  state.selectedInternalBoardItemId = item.id;
+  await api.writeBoardClipboard?.({ items: state.internalBoardClipboard.items, hash: state.internalBoardClipboardHash });
+  setInternalBoardSelection(pasted.map((item) => item.id));
   await saveBoard(board);
 }
 
@@ -1128,7 +1206,7 @@ async function pasteSystemClipboardToAssets() {
 async function undoInternalBoard() {
   const previous = state.internalBoardUndoStack.pop();
   if (!previous) return;
-  state.selectedInternalBoardItemId = "";
+  setInternalBoardSelection([]);
   await saveBoard(previous);
 }
 
@@ -1337,7 +1415,7 @@ document.addEventListener("click", async (event) => {
       return;
     }
     state.activeBoardId = boardTab.dataset.boardTab;
-    state.selectedInternalBoardItemId = "";
+    setInternalBoardSelection([]);
     render();
     return;
   }
@@ -1372,7 +1450,7 @@ document.addEventListener("click", async (event) => {
   if (nav) {
     state.workspaceMode = "assets";
     state.activeBoardId = "";
-    state.selectedInternalBoardItemId = "";
+    setInternalBoardSelection([]);
     state.view = nav.dataset.view;
     state.currentFolderId = "";
     render();
@@ -1450,7 +1528,7 @@ document.addEventListener("click", async (event) => {
     setLibrary(await api.deleteBoard(boardId));
     state.openBoardIds = state.openBoardIds.filter((id) => id !== boardId);
     if (state.activeBoardId === boardId) state.activeBoardId = state.openBoardIds.at(-1) || "";
-    state.selectedInternalBoardItemId = "";
+    setInternalBoardSelection([]);
     state.workspaceMode = "boards";
     render();
     return;
@@ -1479,7 +1557,7 @@ document.addEventListener("click", async (event) => {
   if (folderLink && !event.target.closest("[data-rename-folder]") && !event.target.closest("[data-delete-folder]") && !event.target.closest("[data-new-child-folder]")) {
     state.workspaceMode = "assets";
     state.activeBoardId = "";
-    state.selectedInternalBoardItemId = "";
+    setInternalBoardSelection([]);
     state.currentFolderId = folderLink.dataset.folder;
     state.view = "all";
     render();
@@ -1607,7 +1685,7 @@ document.addEventListener("pointerdown", (event) => {
 
   if (event.button === 1) {
     event.preventDefault();
-    state.selectedInternalBoardItemId = "";
+    setInternalBoardSelection([]);
     state.internalBoardPanning = true;
     state.internalBoardPanStart = { x: event.clientX - board.viewport.x, y: event.clientY - board.viewport.y };
     renderInternalBoards();
@@ -1616,7 +1694,16 @@ document.addEventListener("pointerdown", (event) => {
 
   if (itemEl && event.button === 0) {
     const item = board.items.find((entry) => entry.id === itemEl.dataset.boardItem);
-    state.selectedInternalBoardItemId = item.id;
+    const alreadySelected = state.selectedInternalBoardItemIds.includes(item.id);
+    if (event.shiftKey || event.ctrlKey || event.metaKey) {
+      setInternalBoardSelection(alreadySelected
+        ? state.selectedInternalBoardItemIds.filter((id) => id !== item.id)
+        : [...state.selectedInternalBoardItemIds, item.id]);
+    } else if (!alreadySelected) {
+      setInternalBoardSelection([item.id]);
+    } else {
+      setInternalBoardSelection(state.selectedInternalBoardItemIds.length ? state.selectedInternalBoardItemIds : [item.id]);
+    }
     rememberInternalBoard(board);
     renderInternalBoards();
     if (handle?.dataset.boardHandle === "resize") {
@@ -1628,10 +1715,16 @@ document.addEventListener("pointerdown", (event) => {
       state.internalBoardInteraction = { type: "rotate", boardId: board.id, item, centerX: rect.left + rect.width / 2, centerY: rect.top + rect.height / 2 };
       return;
     }
+    const movingItems = getSelectedInternalBoardItems(board);
     state.internalBoardInteraction = {
       type: "move",
       boardId: board.id,
       item,
+      items: movingItems.map((entry) => ({
+        item: entry,
+        originX: entry.x || 0,
+        originY: entry.y || 0
+      })),
       startX: event.clientX,
       startY: event.clientY,
       originX: item.x,
@@ -1641,7 +1734,13 @@ document.addEventListener("pointerdown", (event) => {
   }
 
   if (event.button === 0) {
-    state.selectedInternalBoardItemId = "";
+    const start = boardPointFromEvent(event, board);
+    setInternalBoardSelection([]);
+    state.internalBoardSelection = {
+      boardId: board.id,
+      start,
+      current: start
+    };
     renderInternalBoards();
   }
 });
@@ -1675,14 +1774,23 @@ window.addEventListener("pointermove", (event) => {
     const board = getBoard(op.boardId);
     if (!board) return;
     if (op.type === "move") {
-      const next = snapBoardItem(
-        board,
-        op.item,
-        op.originX + (event.clientX - op.startX) / board.viewport.scale,
-        op.originY + (event.clientY - op.startY) / board.viewport.scale
-      );
-      op.item.x = next.x;
-      op.item.y = next.y;
+      const deltaX = (event.clientX - op.startX) / board.viewport.scale;
+      const deltaY = (event.clientY - op.startY) / board.viewport.scale;
+      if (op.items?.length > 1) {
+        op.items.forEach((entry) => {
+          entry.item.x = Math.round(entry.originX + deltaX);
+          entry.item.y = Math.round(entry.originY + deltaY);
+        });
+      } else {
+        const next = snapBoardItem(
+          board,
+          op.item,
+          op.originX + deltaX,
+          op.originY + deltaY
+        );
+        op.item.x = next.x;
+        op.item.y = next.y;
+      }
     }
     if (op.type === "resize") {
       op.item.width = Math.max(60, Math.round(op.originWidth + (event.clientX - op.startX) / board.viewport.scale));
@@ -1701,6 +1809,18 @@ window.addEventListener("pointermove", (event) => {
     board.viewport.y = event.clientY - state.internalBoardPanStart.y;
     renderInternalBoards();
   }
+
+  if (state.internalBoardSelection) {
+    const board = getBoard(state.internalBoardSelection.boardId);
+    if (!board) return;
+    state.internalBoardSelection.current = boardPointFromEvent(event, board);
+    const rect = normalizeRect(state.internalBoardSelection.start, state.internalBoardSelection.current);
+    const selected = board.items
+      .filter((item) => rectsIntersect(rect, getBoardItemBounds(board, item)))
+      .map((item) => item.id);
+    setInternalBoardSelection(selected);
+    renderInternalBoards();
+  }
 });
 
 window.addEventListener("pointerup", async () => {
@@ -1708,9 +1828,12 @@ window.addEventListener("pointerup", async () => {
   const board = getBoard(state.activeBoardId);
   if (op && op.type !== "window") await saveBoard(getBoard(op.boardId));
   if (state.internalBoardPanning && board) await saveBoard(board);
+  const hadSelectionBox = Boolean(state.internalBoardSelection);
+  if (state.internalBoardSelection) state.internalBoardSelection = null;
   state.boardTabDrag = null;
   state.internalBoardInteraction = null;
   state.internalBoardPanning = false;
+  if (hadSelectionBox) renderInternalBoards();
 });
 
 els.viewer.addEventListener("wheel", (event) => {
@@ -1879,6 +2002,7 @@ window.addEventListener("keydown", async (event) => {
       return;
     }
     if (matchesShortcut(event, "paste")) {
+      scheduleInternalBoardPasteFallback();
       return;
     }
     if (matchesShortcut(event, "delete") && state.selectedInternalBoardItemId) {
@@ -1913,7 +2037,7 @@ api.onBoardReturned((boardId) => {
   if (!state.openBoardIds.includes(boardId)) state.openBoardIds.push(boardId);
   state.workspaceMode = "boards";
   state.activeBoardId = boardId;
-  state.selectedInternalBoardItemId = "";
+  setInternalBoardSelection([]);
   render();
 });
 applyAppSettings();

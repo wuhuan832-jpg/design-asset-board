@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("assetBoard", {
   importImageData: (payloads) => ipcRenderer.invoke("assets:import-image-data", payloads),
   writeAssetToClipboard: (assetId) => ipcRenderer.invoke("clipboard:write-asset-image", assetId),
   readClipboardImage: () => ipcRenderer.invoke("clipboard:read-image"),
+  writeBoardClipboard: (payload) => ipcRenderer.invoke("board-clipboard:write", payload),
+  readBoardClipboard: () => ipcRenderer.invoke("board-clipboard:read"),
   toggleFavorite: (assetId) => ipcRenderer.invoke("assets:toggle-favorite", assetId),
   setAssetNote: (assetId, note) => ipcRenderer.invoke("assets:set-note", assetId, note),
   deleteAsset: (assetId) => ipcRenderer.invoke("assets:delete", assetId),

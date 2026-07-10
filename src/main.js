@@ -34,6 +34,7 @@ let statePath = "";
 let libraryPath = "";
 let importWatcher;
 let importing = false;
+let boardClipboard = null;
 const boardWindows = new Map();
 let currentWindowTheme = "palette-b";
 
@@ -617,6 +618,15 @@ ipcMain.handle("clipboard:read-image", async () => {
   return clipboardImagePayload(image, `clipboard-${Date.now()}.png`);
 });
 
+ipcMain.handle("board-clipboard:write", async (_event, payload) => {
+  boardClipboard = payload ? JSON.parse(JSON.stringify(payload)) : null;
+  return Boolean(boardClipboard);
+});
+
+ipcMain.handle("board-clipboard:read", async () => {
+  return boardClipboard ? JSON.parse(JSON.stringify(boardClipboard)) : null;
+});
+
 ipcMain.handle("assets:toggle-favorite", async (_event, assetId) => {
   if (!libraryPath) await loadState(getDefaultLibraryPath());
   const asset = state.assets.find((item) => item.id === assetId);
@@ -825,7 +835,8 @@ ipcMain.handle("boards:open-floating", async (_event, boardId) => {
 ipcMain.handle("window:set-always-on-top", async (event, enabled) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) return false;
-  win.setAlwaysOnTop(Boolean(enabled), "floating");
+  win.setAlwaysOnTop(Boolean(enabled), Boolean(enabled) ? "screen-saver" : "normal");
+  if (enabled) win.moveTop();
   return win.isAlwaysOnTop();
 });
 

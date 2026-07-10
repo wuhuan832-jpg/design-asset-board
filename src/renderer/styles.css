@@ -933,6 +933,14 @@ dd {
   outline-offset: 6px;
 }
 
+.board-selection-box {
+  position: absolute;
+  z-index: 20;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  pointer-events: none;
+}
+
 .board-item-inner {
   display: block;
   transform-origin: center center;

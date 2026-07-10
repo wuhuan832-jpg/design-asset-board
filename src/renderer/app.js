@@ -66,6 +66,8 @@ const state = {
   internalBoardUndoStack: [],
   internalBoardClipboard: null,
   internalBoardClipboardHash: "",
+  suppressNextPasteEvent: false,
+  pendingInternalBoardPasteTimer: 0,
   selectedInternalBoardItemId: "",
   boardTabDrag: null,
   suppressBoardTabClick: false,
@@ -1072,6 +1074,57 @@ async function pasteExternalClipboardToInternalBoard(boardId) {
   return true;
 }
 
+function getPasteEventFiles(event) {
+  const files = [...event.clipboardData?.files || []].filter((file) => file?.type?.startsWith("image/"));
+  const itemFiles = [...event.clipboardData?.items || []]
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file) => file?.type?.startsWith("image/"));
+  return files.length ? files : itemFiles;
+}
+
+function suppressNextPasteEventBriefly() {
+  state.suppressNextPasteEvent = true;
+  window.setTimeout(() => {
+    state.suppressNextPasteEvent = false;
+  }, 500);
+}
+
+function clearPendingInternalBoardPaste() {
+  if (!state.pendingInternalBoardPasteTimer) return;
+  window.clearTimeout(state.pendingInternalBoardPasteTimer);
+  state.pendingInternalBoardPasteTimer = 0;
+}
+
+function scheduleInternalBoardPasteFallback() {
+  clearPendingInternalBoardPaste();
+  state.pendingInternalBoardPasteTimer = window.setTimeout(async () => {
+    state.pendingInternalBoardPasteTimer = 0;
+    await pasteInternalBoardItem();
+  }, 400);
+}
+
+async function pasteFilesToCurrentSurface(files) {
+  if (!files.length) return false;
+  const board = getBoard(state.activeBoardId);
+  if (board && state.workspaceMode === "boards" && state.openBoardIds.includes(board.id)) {
+    clearPendingInternalBoardPaste();
+    state.internalBoardClipboard = null;
+    state.internalBoardClipboardHash = "";
+    await importFilesToInternalBoard(board.id, files, getInternalBoardPastePoint(board));
+    return true;
+  }
+  await importBrowserFiles(files, "粘贴图片");
+  return true;
+}
+
+async function pasteSystemClipboardToAssets() {
+  const entries = await readClipboardImageFiles();
+  if (!entries.length) return false;
+  await importBrowserFiles(entries.map((entry) => entry.file), "粘贴图片");
+  return true;
+}
+
 async function undoInternalBoard() {
   const previous = state.internalBoardUndoStack.pop();
   if (!previous) return;
@@ -1104,24 +1157,27 @@ els.clearBtn.addEventListener("click", async () => {
 });
 document.addEventListener("paste", async (event) => {
   if (event.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
-  const files = [...event.clipboardData?.files || []];
-  const itemFiles = [...event.clipboardData?.items || []].filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
-  let pastedFiles = files.length ? files : itemFiles;
-  if (!pastedFiles.length) {
-    pastedFiles = (await readClipboardImageFiles()).map((entry) => entry.file);
-  }
-  if (!pastedFiles.length) return;
-
-  const board = getBoard(state.activeBoardId);
-  if (board && state.workspaceMode === "boards" && state.openBoardIds.includes(board.id)) {
+  if (state.suppressNextPasteEvent) {
+    state.suppressNextPasteEvent = false;
     event.preventDefault();
-    state.internalBoardClipboard = null;
-    state.internalBoardClipboardHash = "";
-    await importFilesToInternalBoard(board.id, pastedFiles, getInternalBoardPastePoint(board));
     return;
   }
+  let pastedFiles = getPasteEventFiles(event);
+  let clipboardEntries = [];
+  if (!pastedFiles.length) {
+    if (!clipboardEntries.length) clipboardEntries = await readClipboardImageFiles();
+    if (state.pendingInternalBoardPasteTimer && state.internalBoardClipboard) {
+      const currentHash = clipboardEntries[0]?.hash || "";
+      if (currentHash && currentHash === state.internalBoardClipboardHash) {
+        event.preventDefault();
+        return;
+      }
+    }
+    pastedFiles = clipboardEntries.map((entry) => entry.file);
+  }
+  if (!pastedFiles.length) return;
   event.preventDefault();
-  await importBrowserFiles(pastedFiles, "\\u7c98\\u8d34\\u56fe\\u7247");
+  await pasteFilesToCurrentSurface(pastedFiles);
 });
 
 document.addEventListener("dragover", (event) => {
@@ -1819,22 +1875,21 @@ window.addEventListener("keydown", async (event) => {
       return;
     }
     if (matchesShortcut(event, "paste") && state.internalBoardClipboard) {
-      event.preventDefault();
-      if (await pasteExternalClipboardToInternalBoard(state.activeBoardId)) return;
-      await pasteInternalBoardItem();
+      scheduleInternalBoardPasteFallback();
       return;
     }
     if (matchesShortcut(event, "paste")) {
-      if (await pasteExternalClipboardToInternalBoard(state.activeBoardId)) {
-        event.preventDefault();
-        return;
-      }
+      return;
     }
     if (matchesShortcut(event, "delete") && state.selectedInternalBoardItemId) {
       event.preventDefault();
       await deleteSelectedInternalBoardItem();
       return;
     }
+  }
+
+  if (matchesShortcut(event, "paste")) {
+    return;
   }
 
   if (matchesShortcut(event, "delete") && state.selectedAssetId) {

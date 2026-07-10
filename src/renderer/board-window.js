@@ -28,7 +28,9 @@ const state = {
   boardPanStart: { x: 0, y: 0 },
   boardUndoStack: [],
   boardClipboard: null,
-  boardClipboardHash: ""
+  boardClipboardHash: "",
+  suppressNextPasteEvent: false,
+  pendingBoardPasteTimer: 0
 };
 
 applyFloatingTheme();
@@ -301,6 +303,36 @@ async function pasteExternalClipboardToBoard() {
   return true;
 }
 
+function getPasteEventFiles(event) {
+  const files = [...event.clipboardData?.files || []].filter((file) => file?.type?.startsWith("image/"));
+  const itemFiles = [...event.clipboardData?.items || []]
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file) => file?.type?.startsWith("image/"));
+  return files.length ? files : itemFiles;
+}
+
+function suppressNextPasteEventBriefly() {
+  state.suppressNextPasteEvent = true;
+  window.setTimeout(() => {
+    state.suppressNextPasteEvent = false;
+  }, 500);
+}
+
+function clearPendingBoardPaste() {
+  if (!state.pendingBoardPasteTimer) return;
+  window.clearTimeout(state.pendingBoardPasteTimer);
+  state.pendingBoardPasteTimer = 0;
+}
+
+function scheduleBoardPasteFallback() {
+  clearPendingBoardPaste();
+  state.pendingBoardPasteTimer = window.setTimeout(async () => {
+    state.pendingBoardPasteTimer = 0;
+    await pasteSelected();
+  }, 400);
+}
+
 async function undoBoard() {
   const previous = state.boardUndoStack.pop();
   if (!previous) return;
@@ -404,17 +436,32 @@ window.addEventListener("pointerup", async () => {
 });
 
 document.addEventListener("paste", async (event) => {
-  const files = [...event.clipboardData?.files || []];
-  const itemFiles = [...event.clipboardData?.items || []].filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
-  const board = getBoard();
-  if (!board) return;
-  const point = boardPastePoint(board);
-  if ((files.length ? files : itemFiles).length) {
-    state.boardClipboard = null;
-    state.boardClipboardHash = "";
+  if (state.suppressNextPasteEvent) {
+    state.suppressNextPasteEvent = false;
     event.preventDefault();
+    return;
   }
-  await importFilesToBoard(files.length ? files : itemFiles, point);
+  let pastedFiles = getPasteEventFiles(event);
+  let clipboardEntries = [];
+  if (!pastedFiles.length) {
+    if (!clipboardEntries.length) clipboardEntries = await readClipboardImageFiles();
+    if (state.pendingBoardPasteTimer && state.boardClipboard) {
+      const currentHash = clipboardEntries[0]?.hash || "";
+      if (currentHash && currentHash === state.boardClipboardHash) {
+        event.preventDefault();
+        return;
+      }
+    }
+    pastedFiles = clipboardEntries.map((entry) => entry.file);
+  }
+  const board = getBoard();
+  if (!board || !pastedFiles.length) return;
+  const point = boardPastePoint(board);
+  clearPendingBoardPaste();
+  state.boardClipboard = null;
+  state.boardClipboardHash = "";
+  event.preventDefault();
+  await importFilesToBoard(pastedFiles, point);
 });
 
 document.addEventListener("dragover", (event) => {
@@ -447,15 +494,11 @@ window.addEventListener("keydown", async (event) => {
     await copySelected();
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v" && state.boardClipboard) {
-    event.preventDefault();
-    if (await pasteExternalClipboardToBoard()) return;
-    await pasteSelected();
+    scheduleBoardPasteFallback();
     return;
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
-    if (await pasteExternalClipboardToBoard()) {
-      event.preventDefault();
-    }
+    return;
   }
   if (event.key === "Delete" || event.key === "Backspace") {
     event.preventDefault();

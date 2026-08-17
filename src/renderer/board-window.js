@@ -25,14 +25,15 @@ const state = {
   selectedBoardItemIds: [],
   boardSelection: null,
   boardInteraction: null,
-  boardPanning: false,
+  boardPanning: null,
+  pendingBoardSave: Promise.resolve(),
   alwaysOnTop: false,
-  boardPanStart: { x: 0, y: 0 },
   boardUndoStack: [],
   boardClipboard: null,
   boardClipboardHash: "",
   suppressNextPasteEvent: false,
-  pendingBoardPasteTimer: 0
+  pendingBoardPasteTimer: 0,
+  lastBoardPointer: null
 };
 
 applyFloatingTheme();
@@ -59,10 +60,12 @@ function clone(value) {
 }
 
 function setLibrary(nextState) {
+  const liveBoard = state.boardInteraction?.board || state.boardPanning?.board;
+  const boards = nextState?.boards || [];
   state.library = {
     assets: nextState?.assets || [],
     boardAssets: nextState?.boardAssets || [],
-    boards: nextState?.boards || []
+    boards: boards.map((board) => liveBoard?.id === board.id ? liveBoard : board)
   };
   render();
 }
@@ -82,7 +85,16 @@ function rememberBoard(board) {
 }
 
 async function saveBoard(board) {
-  setLibrary(await api.saveBoard(board));
+  if (!board) return;
+  const snapshot = clone(board);
+  const save = async () => setLibrary(await api.saveBoard(snapshot));
+  state.pendingBoardSave = state.pendingBoardSave.then(save, save);
+  return state.pendingBoardSave;
+}
+
+function getBoardForClose() {
+  const board = state.boardInteraction?.board || state.boardPanning?.board || getBoard();
+  return board ? clone(board) : null;
 }
 
 function screenToBoardPoint(event, board = getBoard()) {
@@ -101,6 +113,12 @@ function boardPastePoint(board) {
 }
 
 function boardItemSize(board, item) {
+  if (item.type === "text") {
+    return {
+      width: Math.max(120, Number(item.width) || 220),
+      height: Math.max(36, Number(item.height) || 56)
+    };
+  }
   const asset = getAsset(item.assetId);
   const width = Math.max(60, Number(item.width) || 260);
   const aspect = asset?.width && asset?.height ? asset.height / asset.width : 0.72;
@@ -242,19 +260,23 @@ function render() {
       ? [state.selectedBoardItemId]
       : [];
   els.canvas.innerHTML = board.items.map((item) => {
-    const asset = getAsset(item.assetId);
-    if (!asset) return "";
+    const isText = item.type === "text";
+    const asset = isText ? null : getAsset(item.assetId);
+    if (!isText && !asset) return "";
     const rotation = numberOr(item.rotation);
     const flipX = item.flipX ? -1 : 1;
     const flipY = item.flipY ? -1 : 1;
     const selected = selectedIds.includes(item.id);
     const singleSelected = selected && selectedIds.length === 1;
+    const size = boardItemSize(board, item);
     return `
-      <div class="board-item ${selected ? "selected" : ""}" data-board-item="${escapeHtml(item.id)}" style="left:${numberOr(item.x)}px; top:${numberOr(item.y)}px; width:${Math.max(60, numberOr(item.width, 260))}px; transform: rotate(${rotation}deg);">
+      <div class="board-item ${isText ? "board-text-item" : ""} ${selected ? "selected" : ""}" data-board-item="${escapeHtml(item.id)}" style="left:${numberOr(item.x)}px; top:${numberOr(item.y)}px; width:${size.width}px;${isText ? ` height:${size.height}px;` : ""} transform: rotate(${rotation}deg);">
         <div class="board-item-inner" style="transform: scale(${flipX}, ${flipY});">
-          <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />
+          ${isText
+            ? `<div class="board-text-content">${escapeHtml(item.text || "文字")}</div>`
+            : `<img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />`}
         </div>
-        ${singleSelected ? `<button class="rotate-handle" data-board-handle="rotate"></button>
+        ${singleSelected && !isText ? `<button class="rotate-handle" data-board-handle="rotate"></button>
           <button class="resize-handle" data-board-handle="resize"></button>
         ` : ""}
       </div>
@@ -335,13 +357,68 @@ async function deleteSelected() {
   await saveBoard(board);
 }
 
+async function addTextToBoard(text, point) {
+  const board = getBoard();
+  const value = String(text || "").trim();
+  if (!board || !value) return;
+  rememberBoard(board);
+  const item = {
+    id: window.crypto.randomUUID(),
+    type: "text",
+    text: value,
+    x: point.x,
+    y: point.y,
+    width: Math.max(140, Math.min(720, Array.from(value).length * 30 + 28)),
+    height: 56,
+    rotation: 0
+  };
+  board.items.push(item);
+  setBoardSelection([item.id]);
+  await saveBoard(board);
+}
+
+function openBoardTextInput() {
+  const board = getBoard();
+  if (!board) return;
+  document.querySelector(".board-text-entry")?.remove();
+  const point = state.lastBoardPointer || boardPastePoint(board);
+  const input = document.createElement("input");
+  input.className = "board-text-entry";
+  input.type = "text";
+  input.placeholder = "输入文字，按 Enter 放入画板";
+  input.setAttribute("aria-label", "画板文字");
+  const screenX = point.x * board.viewport.scale + board.viewport.x;
+  const screenY = point.y * board.viewport.scale + board.viewport.y;
+  input.style.left = `${Math.max(12, Math.min(els.area.clientWidth - 332, screenX))}px`;
+  input.style.top = `${Math.max(12, Math.min(els.area.clientHeight - 52, screenY))}px`;
+  input.addEventListener("pointerdown", (event) => event.stopPropagation());
+  input.addEventListener("keydown", async (event) => {
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      input.remove();
+      return;
+    }
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    const value = input.value;
+    input.remove();
+    await addTextToBoard(value, point);
+    render();
+  });
+  input.addEventListener("blur", () => setTimeout(() => input.remove(), 0));
+  els.area.appendChild(input);
+  input.focus();
+}
+
 async function copySelected() {
   const board = getBoard();
   const selected = getSelectedBoardItems(board);
   if (!selected.length) return;
   const items = selected.map((item) => clone(item));
   state.boardClipboard = { items };
-  const result = await api.writeAssetToClipboard?.(items[0].assetId);
+  const imageItem = items.find((item) => item.assetId);
+  const result = imageItem ? await api.writeAssetToClipboard?.(imageItem.assetId) : null;
   state.boardClipboardHash = result?.hash || "";
   await api.writeBoardClipboard?.({ items, hash: state.boardClipboardHash });
 }
@@ -365,7 +442,8 @@ async function pasteSelected() {
   }));
   board.items.push(...pasted);
   state.boardClipboard = { items: pasted.map((item) => clone(item)) };
-  const result = await api.writeAssetToClipboard?.(pasted[0].assetId);
+  const imageItem = pasted.find((item) => item.assetId);
+  const result = imageItem ? await api.writeAssetToClipboard?.(imageItem.assetId) : null;
   state.boardClipboardHash = result?.hash || state.boardClipboardHash;
   await api.writeBoardClipboard?.({ items: state.boardClipboard.items, hash: state.boardClipboardHash });
   setBoardSelection(pasted.map((item) => item.id));
@@ -434,10 +512,14 @@ document.addEventListener("click", async (event) => {
 els.area.addEventListener("wheel", async (event) => {
   const board = getBoard();
   if (!board) return;
+  if (state.boardPanning) {
+    event.preventDefault();
+    return;
+  }
   event.preventDefault();
   zoomBoardAtPoint(board, event.clientX, event.clientY, event.deltaY);
   render();
-  await api.saveBoard(board);
+  await saveBoard(board);
 });
 
 els.area.addEventListener("pointerdown", (event) => {
@@ -448,9 +530,18 @@ els.area.addEventListener("pointerdown", (event) => {
   if (event.button === 1) {
     event.preventDefault();
     setBoardSelection([]);
-    state.boardPanning = true;
-    state.boardPanStart = { x: event.clientX - board.viewport.x, y: event.clientY - board.viewport.y };
-    render();
+    state.boardInteraction = null;
+    state.boardSelection = null;
+    state.boardPanning = {
+      board,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: board.viewport.x,
+      originY: board.viewport.y
+    };
+    els.area.classList.add("panning");
+    els.area.setPointerCapture?.(event.pointerId);
     return;
   }
   if (itemEl && event.button === 0) {
@@ -468,18 +559,19 @@ els.area.addEventListener("pointerdown", (event) => {
     render();
     if (handle?.dataset.boardHandle === "resize") {
       rememberBoard(board);
-      state.boardInteraction = { type: "resize", item, startX: event.clientX, originWidth: numberOr(item.width, 260) };
+      state.boardInteraction = { type: "resize", board, item, startX: event.clientX, originWidth: numberOr(item.width, 260) };
       return;
     }
     if (handle?.dataset.boardHandle === "rotate") {
       rememberBoard(board);
       const rect = itemEl.getBoundingClientRect();
-      state.boardInteraction = { type: "rotate", item, centerX: rect.left + rect.width / 2, centerY: rect.top + rect.height / 2 };
+      state.boardInteraction = { type: "rotate", board, item, centerX: rect.left + rect.width / 2, centerY: rect.top + rect.height / 2 };
       return;
     }
     rememberBoard(board);
     state.boardInteraction = {
       type: "move",
+      board,
       item,
       items: getSelectedBoardItems(board).map((entry) => ({
         item: entry,
@@ -510,6 +602,17 @@ els.pinWindowBtn.addEventListener("click", async () => {
 
 window.addEventListener("pointermove", (event) => {
   const board = getBoard();
+  if (board && els.area.contains(event.target)) {
+    state.lastBoardPointer = screenToBoardPoint(event, board);
+  }
+  if (state.boardPanning && board) {
+    const pan = state.boardPanning;
+    if (event.pointerId !== pan.pointerId) return;
+    board.viewport.x = Math.round(pan.originX + event.clientX - pan.startX);
+    board.viewport.y = Math.round(pan.originY + event.clientY - pan.startY);
+    els.canvas.style.transform = `translate(${board.viewport.x}px, ${board.viewport.y}px) scale(${board.viewport.scale})`;
+    return;
+  }
   if (state.boardInteraction && board) {
     const op = state.boardInteraction;
     if (op.type === "move") {
@@ -535,11 +638,6 @@ window.addEventListener("pointermove", (event) => {
     if (op.type === "rotate") op.item.rotation = Math.round(Math.atan2(event.clientY - op.centerY, event.clientX - op.centerX) * 180 / Math.PI + 90);
     render();
   }
-  if (state.boardPanning && board) {
-    board.viewport.x = event.clientX - state.boardPanStart.x;
-    board.viewport.y = event.clientY - state.boardPanStart.y;
-    render();
-  }
   if (state.boardSelection && board) {
     state.boardSelection.current = screenToBoardPoint(event, board);
     const rect = normalizeRect(state.boardSelection.start, state.boardSelection.current);
@@ -551,13 +649,30 @@ window.addEventListener("pointermove", (event) => {
   }
 });
 
-window.addEventListener("pointerup", async () => {
+window.addEventListener("pointerup", async (event) => {
   const board = getBoard();
-  if ((state.boardInteraction || state.boardPanning) && board) await api.saveBoard(board);
+  if (state.boardPanning) {
+    if (event.pointerId !== state.boardPanning.pointerId) return;
+    const pan = state.boardPanning;
+    els.area.classList.remove("panning");
+    if (els.area.hasPointerCapture?.(pan.pointerId)) els.area.releasePointerCapture(pan.pointerId);
+    if (pan.board || board) await saveBoard(pan.board || board);
+    state.boardPanning = null;
+    return;
+  }
+  if (state.boardInteraction?.board || board) await saveBoard(state.boardInteraction?.board || board);
   state.boardSelection = null;
   state.boardInteraction = null;
-  state.boardPanning = false;
   render();
+});
+
+window.addEventListener("pointercancel", async (event) => {
+  const pan = state.boardPanning;
+  if (!pan || event.pointerId !== pan.pointerId) return;
+  els.area.classList.remove("panning");
+  const board = pan.board || getBoard();
+  if (board) await saveBoard(board);
+  state.boardPanning = null;
 });
 
 document.addEventListener("paste", async (event) => {
@@ -610,6 +725,12 @@ document.addEventListener("drop", async (event) => {
 });
 
 window.addEventListener("keydown", async (event) => {
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName)) return;
+  if (event.key.toLowerCase() === "t" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    openBoardTextInput();
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
     event.preventDefault();
     await undoBoard();
@@ -633,5 +754,15 @@ window.addEventListener("keydown", async (event) => {
 });
 
 api.onLibraryUpdated(setLibrary);
+api.onPrepareToClose?.(async () => {
+  clearPendingBoardPaste();
+  const liveBoard = getBoardForClose();
+  await state.pendingBoardSave.catch(() => {});
+  if (liveBoard) await api.saveBoards([clone(liveBoard)]);
+});
+window.addEventListener("beforeunload", () => {
+  const board = getBoardForClose();
+  api.flushBoardsSync?.(board ? [board] : []);
+});
 api.getLibrary().then(setLibrary);
 

@@ -47,6 +47,14 @@
           <div id="boardList" class="board-list"></div>
         </section>
 
+        <section class="note-nav">
+          <div class="section-title">
+            <span>笔记</span>
+            <button id="newNoteBtn" data-create-note title="新建笔记">+</button>
+          </div>
+          <div id="noteList" class="note-list"></div>
+        </section>
+
         <div class="library-card">
           <span>图片保存方式</span>
           <strong id="libraryPath">软件自动保存，不需要电脑文件夹整理</strong>
@@ -98,14 +106,15 @@
 
     <div class="viewer hidden" id="viewer">
       <div class="viewer-topbar">
-        <button id="closeViewerBtn">返回</button>
+        <strong class="viewer-title">高清查看</strong>
         <div class="viewer-actions">
-          <button id="prevBtn">上一张</button>
-          <button id="nextBtn">下一张</button>
-          <button id="fitBtn">适应窗口</button>
-          <button id="actualBtn">原始尺寸</button>
-          <button id="toggleAnnotationsBtn">隐藏批注</button>
+          <button id="prevBtn" type="button">上一张</button>
+          <button id="nextBtn" type="button">下一张</button>
+          <button id="fitBtn" type="button">适应窗口</button>
+          <button id="actualBtn" type="button">原始尺寸</button>
+          <button id="toggleAnnotationsBtn" type="button">隐藏批注</button>
         </div>
+        <button id="closeViewerBtn" class="viewer-close-button" type="button" title="退出查看（Esc）" aria-label="退出图片查看">×</button>
       </div>
       <div class="viewer-body">
         <div class="image-plane" id="imagePlane">

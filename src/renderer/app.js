@@ -5,6 +5,7 @@ const els = {
   importBtn: document.querySelector("#importBtn"),
   dropHint: document.querySelector("#dropHint"),
   newBoardBtn: document.querySelector("#newBoardBtn"),
+  newNoteBtn: document.querySelector("#newNoteBtn"),
   newFolderBtn: document.querySelector("#newFolderBtn"),
   assetGrid: document.querySelector("#assetGrid"),
   boardDock: document.querySelector("#boardDock"),
@@ -14,6 +15,7 @@ const els = {
   workspace: document.querySelector(".workspace"),
   folderList: document.querySelector("#folderList"),
   boardList: document.querySelector("#boardList"),
+  noteList: document.querySelector("#noteList"),
   viewTitle: document.querySelector("#viewTitle"),
   viewSubtitle: document.querySelector("#viewSubtitle"),
   allCount: document.querySelector("#allCount"),
@@ -43,11 +45,13 @@ const els = {
 };
 
 const state = {
-  library: { assets: [], boardAssets: [], recycleBin: [], folders: [], boards: [], annotations: {}, notes: [], mindMaps: [], settings: {} },
+  library: { assets: [], boardAssets: [], recycleBin: [], folders: [], groups: [], boards: [], annotations: {}, notes: [], notePages: [], mindMaps: [], settings: {} },
   workspaceMode: "assets",
   view: "all",
   currentFolderId: "",
   selectedAssetId: "",
+  selectedAssetIds: [],
+  assetSelection: null,
   viewerAssetId: "",
   viewerZoom: 1,
   viewerPan: { x: 0, y: 0 },
@@ -55,14 +59,19 @@ const state = {
   viewerDragStart: { x: 0, y: 0 },
   tool: "pen",
   folderPopoverAssetId: "",
+  expandedFolderIds: new Set(),
   renamingFolderId: "",
+  renamingGroupId: "",
+  renameCommitInProgress: false,
   renamingBoardId: "",
+  selectedNoteId: "",
+  noteSaveTimers: new Map(),
   openBoardIds: [],
   activeBoardId: "",
   internalBoardWindows: {},
   internalBoardInteraction: null,
-  internalBoardPanning: false,
-  internalBoardPanStart: { x: 0, y: 0 },
+  internalBoardPanning: null,
+  pendingBoardSave: Promise.resolve(),
   internalBoardUndoStack: [],
   internalBoardClipboard: null,
   internalBoardClipboardHash: "",
@@ -71,6 +80,7 @@ const state = {
   selectedInternalBoardItemId: "",
   selectedInternalBoardItemIds: [],
   internalBoardSelection: null,
+  internalBoardPointer: null,
   boardTabDrag: null,
   suppressBoardTabClick: false,
   annotationsVisible: true,
@@ -241,9 +251,11 @@ function normalizeLibrary(nextState) {
     boardAssets: nextState?.boardAssets || [],
     recycleBin: nextState?.recycleBin || [],
     folders: nextState?.folders || [],
+    groups: nextState?.groups || [],
     boards: nextState?.boards || [],
     annotations: nextState?.annotations || {},
     notes: nextState?.notes || [],
+    notePages: nextState?.notePages || [],
     mindMaps: nextState?.mindMaps || [],
     settings: nextState?.settings || {}
   };
@@ -259,6 +271,14 @@ function getFolder(folderId) {
   return state.library.folders.find((folder) => folder.id === folderId);
 }
 
+function getGroup(groupId) {
+  return state.library.groups.find((group) => group.id === groupId);
+}
+
+function getNotePage(noteId = state.selectedNoteId) {
+  return state.library.notePages.find((note) => note.id === noteId);
+}
+
 function getBoard(boardId = state.activeBoardId) {
   return state.library.boards.find((board) => board.id === boardId);
 }
@@ -272,7 +292,22 @@ function clone(value) {
 }
 
 async function saveBoard(board) {
-  setLibrary(await api.saveBoard(board));
+  if (!board) return;
+  const snapshot = clone(board);
+  const save = async () => setLibrary(await api.saveBoard(snapshot));
+  state.pendingBoardSave = state.pendingBoardSave.then(save, save);
+  return state.pendingBoardSave;
+}
+
+function getBoardsForClose() {
+  const boards = new Map();
+  for (const openBoardId of state.openBoardIds) {
+    const board = getBoard(openBoardId);
+    if (board) boards.set(board.id, board);
+  }
+  const liveBoard = state.internalBoardInteraction?.board || state.internalBoardPanning?.board;
+  if (liveBoard) boards.set(liveBoard.id, liveBoard);
+  return [...boards.values()].map(clone);
 }
 
 async function detachBoardToFloating(boardId) {
@@ -327,6 +362,12 @@ function getInternalBoardPastePoint(board) {
 }
 
 function boardItemSize(board, item) {
+  if (item.type === "text") {
+    return {
+      width: Math.max(120, Number(item.width) || 220),
+      height: Math.max(36, Number(item.height) || 56)
+    };
+  }
   const asset = getAsset(item.assetId);
   const width = Math.max(60, Number(item.width) || 260);
   const aspect = asset?.width && asset?.height ? asset.height / asset.width : 0.72;
@@ -481,19 +522,23 @@ function renderFolderTree(parentId = "", depth = 0) {
   return state.library.folders
     .filter((folder) => (folder.parentId || "") === parentId)
     .map((folder) => {
-      const children = renderFolderTree(folder.id, depth + 1);
+      const hasChildren = state.library.folders.some((item) => (item.parentId || "") === folder.id);
+      const expanded = hasChildren && state.expandedFolderIds.has(folder.id);
+      const children = expanded ? renderFolderTree(folder.id, depth + 1) : "";
       if (state.renamingFolderId === folder.id) {
         return `
           <div class="folder-link active folder-edit-row" style="--folder-depth:${depth}">
-            <input class="folder-name-input" data-folder-name-input="${escapeHtml(folder.id)}" value="${escapeHtml(folder.name)}" />
-            <button class="folder-save" data-save-folder="${escapeHtml(folder.id)}">\u4fdd\u5b58</button>
-            <button class="folder-cancel" data-cancel-folder-rename="${escapeHtml(folder.id)}">\u53d6\u6d88</button>
+            <span class="folder-tree-spacer" aria-hidden="true"></span>
+            <input class="folder-name-input" data-folder-name-input="${escapeHtml(folder.id)}" value="${escapeHtml(folder.name)}" aria-label="文件夹名称" />
           </div>
           ${children}
         `;
       }
       return `
-        <div class="folder-link ${folder.id === state.currentFolderId ? "active" : ""}" data-folder="${escapeHtml(folder.id)}" style="--folder-depth:${depth}">
+        <div class="folder-link ${folder.id === state.currentFolderId ? "active" : ""} ${hasChildren ? "has-children" : ""}" data-folder="${escapeHtml(folder.id)}" style="--folder-depth:${depth}">
+          ${hasChildren
+            ? `<button class="folder-tree-toggle ${expanded ? "expanded" : ""}" data-toggle-folder-tree="${escapeHtml(folder.id)}" aria-expanded="${expanded}" title="${expanded ? "收起子文件夹" : "展开子文件夹"}" aria-label="${expanded ? "收起子文件夹" : "展开子文件夹"}"><span aria-hidden="true">›</span></button>`
+            : `<span class="folder-tree-spacer" aria-hidden="true"></span>`}
           <span class="folder-name">${escapeHtml(folder.name)}</span>
           <small>${folderAssetCount(folder.id)} \u5f20</small>
         </div>
@@ -529,6 +574,135 @@ function focusBoardRenameInput(boardId) {
     input?.focus();
     input?.select();
   }, 0);
+}
+
+function focusGroupRenameInput(groupId) {
+  setTimeout(() => {
+    const input = document.querySelector(`[data-group-name-input="${CSS.escape(groupId)}"]`);
+    input?.focus();
+    input?.select();
+  }, 0);
+}
+
+async function commitGroupRename(input) {
+  if (!input?.isConnected || state.renameCommitInProgress) return;
+  const groupId = input.dataset.groupNameInput;
+  const group = getGroup(groupId);
+  const nextName = input.value.trim() || group?.name;
+  if (!group || !nextName) return;
+  state.renameCommitInProgress = true;
+  state.renamingGroupId = "";
+  try {
+    setLibrary(await api.updateGroup(groupId, { name: nextName }));
+  } finally {
+    state.renameCommitInProgress = false;
+  }
+}
+
+async function commitFolderRename(input) {
+  if (!input?.isConnected || state.renameCommitInProgress) return;
+  const folderId = input.dataset.folderNameInput;
+  const folder = getFolder(folderId);
+  const nextName = input.value.trim() || folder?.name;
+  if (!folder || !nextName) return;
+  state.renameCommitInProgress = true;
+  state.renamingFolderId = "";
+  try {
+    const next = await api.renameFolder(folderId, nextName);
+    setLibrary(next);
+    state.currentFolderId = folderId;
+    render();
+  } finally {
+    state.renameCommitInProgress = false;
+  }
+}
+
+function commitInlineRenameBeforePointerAction(event) {
+  if (event.button !== 0 || event.target.closest?.("[data-group-name-input], [data-folder-name-input]")) return;
+  const groupInput = document.querySelector("[data-group-name-input]");
+  const folderInput = document.querySelector("[data-folder-name-input]");
+  if (groupInput) {
+    void commitGroupRename(groupInput);
+    return;
+  }
+  if (folderInput) void commitFolderRename(folderInput);
+}
+
+function noteContent(note) {
+  if (typeof note?.content === "string" && note.content) return note.content;
+  return escapeHtml(note?.text || "").replace(/\n/g, "<br>");
+}
+
+function sanitizeNoteContent(editor) {
+  const clone = editor.cloneNode(true);
+  clone.querySelectorAll("script, style, iframe, object, embed, link, meta").forEach((node) => node.remove());
+  clone.querySelectorAll("*").forEach((node) => {
+    for (const attribute of [...node.attributes]) {
+      const keepImageAttribute = node.tagName === "IMG" && ["src", "alt", "data-note-asset-id"].includes(attribute.name);
+      if (!keepImageAttribute) node.removeAttribute(attribute.name);
+    }
+  });
+  return clone.innerHTML;
+}
+
+function scheduleNoteContentSave(editor) {
+  const noteId = editor?.dataset.noteContent;
+  const note = getNotePage(noteId);
+  if (!note) return;
+  note.content = sanitizeNoteContent(editor);
+  clearTimeout(state.noteSaveTimers.get(noteId));
+  state.noteSaveTimers.set(noteId, setTimeout(() => void flushNoteContentSave(noteId), 320));
+}
+
+async function flushNoteContentSave(noteId) {
+  const timer = state.noteSaveTimers.get(noteId);
+  if (!timer) return;
+  clearTimeout(timer);
+  state.noteSaveTimers.delete(noteId);
+  const note = getNotePage(noteId);
+  if (note) await api.updateNotePage(noteId, { content: note.content || "" });
+}
+
+async function flushAllNoteContentSaves() {
+  await Promise.all([...state.noteSaveTimers.keys()].map((noteId) => flushNoteContentSave(noteId)));
+}
+
+function insertNodeAtRange(range, node) {
+  range.deleteContents();
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.collapse(true);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+async function pasteImagesIntoNote(editor, files) {
+  const imageFiles = [...files].filter((file) => file.type?.startsWith("image/"));
+  if (!imageFiles.length) return false;
+  const selection = window.getSelection();
+  const range = selection?.rangeCount && editor.contains(selection.anchorNode)
+    ? selection.getRangeAt(0).cloneRange()
+    : document.createRange();
+  if (!selection?.rangeCount || !editor.contains(selection.anchorNode)) range.selectNodeContents(editor);
+  range.collapse(false);
+  const payloads = await Promise.all(imageFiles.map(async (file, index) => ({
+    name: file.name || `note-image-${Date.now()}-${index + 1}.png`,
+    type: file.type || "image/png",
+    boardOnly: true,
+    bytes: await file.arrayBuffer()
+  })));
+  const added = await api.importNoteImages(editor.dataset.noteContent, payloads);
+  for (const asset of added || []) {
+    const image = document.createElement("img");
+    image.src = asset.url;
+    image.alt = asset.name || "note image";
+    image.dataset.noteAssetId = asset.id;
+    insertNodeAtRange(range, image);
+    insertNodeAtRange(range, document.createElement("br"));
+  }
+  scheduleNoteContentSave(editor);
+  return Boolean(added?.length);
 }
 
 function getAssetsForView() {
@@ -577,7 +751,16 @@ async function importBrowserFiles(files, sourceName = "\u56fe\u7247") {
 
 function setLibrary(nextState) {
   if (!nextState) return;
-  state.library = normalizeLibrary(nextState);
+  const liveBoards = new Map();
+  if (state.internalBoardInteraction?.board) {
+    liveBoards.set(state.internalBoardInteraction.board.id, state.internalBoardInteraction.board);
+  }
+  if (state.internalBoardPanning?.board) {
+    liveBoards.set(state.internalBoardPanning.board.id, state.internalBoardPanning.board);
+  }
+  const normalized = normalizeLibrary(nextState);
+  normalized.boards = normalized.boards.map((board) => liveBoards.get(board.id) || board);
+  state.library = normalized;
   if (state.currentFolderId && !getFolder(state.currentFolderId)) state.currentFolderId = "";
   render();
 }
@@ -586,7 +769,9 @@ function render() {
   els.allCount.textContent = state.library.assets.length;
   els.libraryPath.textContent = "\u8f6f\u4ef6\u81ea\u52a8\u4fdd\u5b58\uff0c\u4e0d\u9700\u8981\u7535\u8111\u6587\u4ef6\u5939\u6574\u7406";
   els.appShell.classList.toggle("board-shell", state.workspaceMode === "boards");
+  els.appShell.classList.toggle("notes-shell", state.workspaceMode === "assets" && state.view === "notes");
   els.workspace.classList.toggle("board-workspace", state.workspaceMode === "boards");
+  els.workspace.classList.toggle("notes-mode", state.workspaceMode === "assets" && state.view === "notes");
   ensureTrashNav();
   renderNavigation();
   renderMain();
@@ -607,7 +792,6 @@ function renderNavigation() {
   });
   const trashCount = document.querySelector("#trashCount");
   if (trashCount) trashCount.textContent = state.library.recycleBin.length;
-
   els.folderList.innerHTML = state.library.folders.length
     ? renderFolderTree()
     : `<p class="muted sidebar-note">\u70b9 + \u521b\u5efa\u8f6f\u4ef6\u5185\u6587\u4ef6\u5939\uff0c\u4e0d\u4f1a\u521b\u5efa\u7535\u8111\u771f\u5b9e\u6587\u4ef6\u5939\u3002</p>`;
@@ -622,6 +806,12 @@ function renderNavigation() {
     <button class="board-link" data-board="${escapeHtml(board.id)}" title="\u6253\u5f00\u753b\u677f">
       <span>${escapeHtml(board.name)}</span>
       <small>${board.items?.length || 0} \u5f20</small>
+    </button>
+  `).join("");
+
+  els.noteList.innerHTML = state.library.notePages.map((note) => `
+    <button class="note-link ${state.view === "notes" && state.selectedNoteId === note.id ? "active" : ""}" data-note-link="${escapeHtml(note.id)}" title="打开笔记">
+      <span>${escapeHtml(note.title || "未命名笔记")}</span>
     </button>
   `).join("");
 }
@@ -640,6 +830,12 @@ function renderMain() {
     els.viewSubtitle.textContent = "\u8fd8\u6ca1\u6709\u6253\u5f00\u7684\u753b\u677f\u3002\u70b9\u51fb\u5de6\u4fa7\u753b\u677f\u6253\u5f00\uff0c\u6216\u628a\u72ec\u7acb\u753b\u677f\u62d6\u56de\u8fd9\u91cc\u3002";
     return;
   }
+  if (state.view === "notes") {
+    els.viewTitle.textContent = "笔记";
+    els.viewSubtitle.textContent = "独立整理想法与文字草稿。笔记会自动保存在软件内部。";
+    renderNotesWorkspace();
+    return;
+  }
   const folder = getFolder(state.currentFolderId);
   els.viewTitle.textContent = folder?.name || { all: "\u5168\u90e8\u7d20\u6750", recent: "\u6700\u8fd1\u5bfc\u5165", favorite: "\u6536\u85cf", uncategorized: "\u672a\u5206\u7c7b", trash: "\u56de\u6536\u7ad9" }[state.view];
   els.viewSubtitle.textContent = folder
@@ -649,29 +845,170 @@ function renderMain() {
       : "\u76f4\u63a5 Ctrl+V \u7c98\u8d34\u56fe\u7247\u3002\u753b\u677f\u4f1a\u5148\u4f5c\u4e3a\u8f6f\u4ef6\u5185\u6807\u7b7e\u9875\u6253\u5f00\u3002";
   renderAssetGrid();
 }
-function renderAssetGrid() {
-  const assets = getAssetsForView();
-  if (!assets.length) {
-    els.assetGrid.innerHTML = `
-      <div class="empty-state">
-        <h3>${state.view === "trash" ? "\u56de\u6536\u7ad9\u662f\u7a7a\u7684" : "\u8fd9\u91cc\u8fd8\u6ca1\u6709\u56fe\u7247"}</h3>
-        <p>${state.view === "trash" ? "\u5220\u9664\u7684\u7d20\u6750\u4f1a\u5728\u8fd9\u91cc\u4fdd\u7559\u4e00\u6bb5\u65f6\u95f4\u3002" : "\u76f4\u63a5 Ctrl+V \u7c98\u8d34\u56fe\u7247\u3002"}</p>
-      </div>
-    `;
-    return;
-  }
 
-  els.assetGrid.innerHTML = assets.map((asset) => `
-    <article class="asset-card ${asset.id === state.selectedAssetId ? "selected" : ""}" data-asset="${escapeHtml(asset.id)}" draggable="true">
-      <button class="favorite ${asset.favorite ? "on" : ""}" data-favorite="${escapeHtml(asset.id)}" title="\u6536\u85cf">\u2605</button>
-      <button class="folder-chip" data-folder-menu="${escapeHtml(asset.id)}" title="\u653e\u5165\u8f6f\u4ef6\u5185\u6587\u4ef6\u5939">\u6587\u4ef6\u5939</button>
+function renderNotesWorkspace() {
+  const selected = getNotePage();
+  els.assetGrid.classList.remove("grouped-assets");
+  els.assetGrid.innerHTML = `
+    <section class="notes-workspace">
+      <div class="notes-toolbar" aria-label="笔记工具">
+        <button class="primary-note-action" data-create-note><span aria-hidden="true">＋</span><span>新建</span></button>
+        <span class="notes-toolbar-divider" aria-hidden="true"></span>
+        <label class="note-toolbar-control"><span>纸张</span><select aria-label="纸张纹理" data-note-setting="paper" ${selected ? "" : "disabled"}>
+          <option value="plain" ${selected?.paper === "plain" ? "selected" : ""}>素白</option>
+          <option value="lined" ${selected?.paper === "lined" ? "selected" : ""}>横线</option>
+          <option value="grid" ${selected?.paper === "grid" ? "selected" : ""}>方格</option>
+          <option value="dot" ${selected?.paper === "dot" ? "selected" : ""}>点阵</option>
+          <option value="soft" ${selected?.paper === "soft" ? "selected" : ""}>柔和纸纹</option>
+        </select></label>
+        <label class="note-toolbar-control note-font-control"><span>字体</span><select aria-label="字体" data-note-setting="fontFamily" ${selected ? "" : "disabled"}>
+          ${["Microsoft YaHei", "SimSun", "KaiTi", "Arial", "Georgia"].map((font) => `<option value="${font}" ${selected?.fontFamily === font ? "selected" : ""}>${font}</option>`).join("")}
+        </select></label>
+        <label class="note-toolbar-control note-size-control"><span>字号</span><select aria-label="字号" data-note-setting="fontSize" ${selected ? "" : "disabled"}>
+          ${[14, 16, 18, 20, 24, 28, 36, 48, 60, 72].map((size) => `<option value="${size}" ${Number(selected?.fontSize) === size ? "selected" : ""}>${size}</option>`).join("")}
+        </select></label>
+        <label class="note-toolbar-control note-color-control"><span>颜色</span><input aria-label="文字颜色" data-note-setting="color" type="color" value="${escapeHtml(selected?.color || "#3a2d2b")}" ${selected ? "" : "disabled"} /></label>
+        <span class="note-selection-actions">${selected ? `<button class="note-delete" data-delete-note="${escapeHtml(selected.id)}" title="删除当前笔记">删除</button>` : `<span class="notes-toolbar-hint">选择或新建一篇笔记</span>`}</span>
+      </div>
+      <div class="notes-canvas" data-notes-canvas>
+        ${selected ? `
+          <article class="note-page paper-${escapeHtml(selected.paper || "plain")}" data-note-page="${escapeHtml(selected.id)}" style="--note-ink:${escapeHtml(selected.color || "#3a2d2b")};--note-font:${escapeHtml(selected.fontFamily || "Microsoft YaHei")};--note-size:${Number(selected.fontSize) || 18}px;">
+            <div class="note-page-header">
+              <input class="note-title-input" data-note-title="${escapeHtml(selected.id)}" value="${escapeHtml(selected.title || "未命名笔记")}" placeholder="无标题" aria-label="笔记标题" />
+            </div>
+            <div class="note-body-input" data-note-content="${escapeHtml(selected.id)}" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="从这里开始记录，也可以直接粘贴图片……">${noteContent(selected)}</div>
+          </article>
+        ` : `<div class="notes-empty"><div class="notes-empty-icon" aria-hidden="true">▤</div><h3>开始一篇笔记</h3><p>记录设计思路、项目草稿或参考说明，也可以直接粘贴图片。</p><button data-create-note>新建笔记</button></div>`}
+      </div>
+    </section>
+  `;
+}
+
+function syncNoteSelectionUI() {
+  const note = getNotePage();
+  document.querySelectorAll("[data-note-page]").forEach((page) => {
+    page.classList.toggle("selected", page.dataset.notePage === state.selectedNoteId);
+  });
+  document.querySelectorAll("[data-note-setting]").forEach((control) => {
+    control.disabled = !note;
+    if (note && Object.hasOwn(note, control.dataset.noteSetting)) control.value = note[control.dataset.noteSetting];
+  });
+  const actions = document.querySelector(".note-selection-actions");
+  if (actions) actions.innerHTML = note
+    ? `<button class="note-delete" data-delete-note="${escapeHtml(note.id)}">删除笔记</button>`
+    : `<span class="notes-toolbar-hint">先选择一张笔记</span>`;
+  renderInspector();
+}
+
+function renderAssetCard(asset) {
+  const selected = state.selectedAssetIds.includes(asset.id) || (!state.selectedAssetIds.length && asset.id === state.selectedAssetId);
+  return `
+    <article class="asset-card ${selected ? "selected" : ""}" data-asset="${escapeHtml(asset.id)}" draggable="true">
+      <button class="favorite ${asset.favorite ? "on" : ""}" data-favorite="${escapeHtml(asset.id)}" title="收藏">★</button>
+      <button class="folder-chip" data-folder-menu="${escapeHtml(asset.id)}" title="放入软件内文件夹">文件夹</button>
       <div class="thumb"><img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" loading="lazy" /></div>
       <div class="asset-caption">
         <strong>${escapeHtml(asset.name)}</strong>
-        <span>${state.view === "trash" ? `\u5220\u9664\u4e8e ${formatDate(asset.deletedAt)}` : `${escapeHtml(asset.width || "-")} \u00d7 ${escapeHtml(asset.height || "-")} \u00b7 ${escapeHtml(asset.ext)}`}</span>
+        <span>${state.view === "trash" ? `删除于 ${formatDate(asset.deletedAt)}` : `${escapeHtml(asset.width || "-")} × ${escapeHtml(asset.height || "-")} · ${escapeHtml(asset.ext)}`}</span>
       </div>
     </article>
-  `).join("");
+  `;
+}
+
+function renderGroupedAssetTile(asset) {
+  const selected = state.selectedAssetIds.includes(asset.id) || (!state.selectedAssetIds.length && asset.id === state.selectedAssetId);
+  return `
+    <article class="grouped-asset-tile ${selected ? "selected" : ""}" data-asset="${escapeHtml(asset.id)}" draggable="true" title="${escapeHtml(asset.name)}">
+      <button class="favorite ${asset.favorite ? "on" : ""}" data-favorite="${escapeHtml(asset.id)}" title="收藏">★</button>
+      <button class="folder-chip" data-folder-menu="${escapeHtml(asset.id)}" title="放入软件内文件夹">文件夹</button>
+      <div class="grouped-asset-thumb"><img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" loading="lazy" /></div>
+      <div class="grouped-asset-caption">
+        <strong>${escapeHtml(asset.name)}</strong>
+        <span>${escapeHtml(asset.width || "-")} × ${escapeHtml(asset.height || "-")}</span>
+      </div>
+    </article>
+  `;
+}
+
+function renderAssetGroupStack(group, assets) {
+  const editing = state.renamingGroupId === group.id;
+  const groupColor = group.color || "#9A4F60";
+  const visibleAssets = group.collapsed ? assets.slice(0, 3) : assets;
+  const hiddenCount = assets.length - visibleAssets.length;
+  const groupSpan = Math.min(Math.max(assets.length, 2), 3);
+  const itemCountClass = visibleAssets.length > 3 ? "many" : String(Math.max(visibleAssets.length, 1));
+  return `
+    <section class="asset-group-stack ${group.collapsed ? "collapsed" : "expanded"}" data-asset-group="${escapeHtml(group.id)}" data-group-drop="${escapeHtml(group.id)}" style="--group-color:${escapeHtml(groupColor)};--group-span:${groupSpan};--group-count:${visibleAssets.length}">
+      <header class="asset-group-stack-header" data-asset-group-meta>
+        <button class="group-collapse" data-toggle-group="${escapeHtml(group.id)}" title="${group.collapsed ? "展开组" : "收起组"}" aria-label="${group.collapsed ? "展开组" : "收起组"}">${group.collapsed ? "▸" : "▾"}</button>
+        <span class="group-color-mark" aria-hidden="true"></span>
+        ${editing ? `
+          <input class="group-name-input" data-group-name-input="${escapeHtml(group.id)}" value="${escapeHtml(group.name)}" aria-label="组名称" />
+        ` : `<button class="asset-group-name" data-group-name="${escapeHtml(group.id)}" title="双击重命名">${escapeHtml(group.name)}</button>`}
+        <span class="group-count">${assets.length} 张</span>
+        <input class="group-color-input" data-group-color="${escapeHtml(group.id)}" type="color" value="${escapeHtml(groupColor)}" title="更改组颜色" aria-label="更改组颜色" />
+        <button class="group-more" data-group-more="${escapeHtml(group.id)}" title="组设置" aria-label="组设置">•••</button>
+      </header>
+      <div class="asset-group-stack-items group-items-${itemCountClass}">
+        ${visibleAssets.map((asset) => renderGroupedAssetTile(asset)).join("")}
+        ${hiddenCount ? `<button class="group-hidden-count" data-toggle-group="${escapeHtml(group.id)}" title="展开查看全部图片">+${hiddenCount}</button>` : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderChildFolders() {
+  if (!state.currentFolderId) return "";
+  const children = state.library.folders.filter((folder) => (folder.parentId || "") === state.currentFolderId);
+  if (!children.length) return "";
+  return `
+    <section class="child-folder-block">
+      <header><strong>子文件夹</strong><span>${children.length} 个</span></header>
+      <div class="child-folder-list">
+        ${children.map((folder) => `
+          <button class="child-folder-tile" data-open-child-folder="${escapeHtml(folder.id)}">
+            <span class="child-folder-icon" aria-hidden="true"></span>
+            <strong>${escapeHtml(folder.name)}</strong>
+            <small>${folderAssetCount(folder.id)} 张</small>
+          </button>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderAssetGrid() {
+  const assets = getAssetsForView();
+  const folderGroups = state.currentFolderId
+    ? state.library.groups.filter((group) => group.folderId === state.currentFolderId)
+    : [];
+  const childFolders = renderChildFolders();
+  els.assetGrid.classList.remove("grouped-assets");
+  els.assetGrid.classList.toggle("group-marked-assets", Boolean(folderGroups.length));
+  els.assetGrid.classList.toggle("has-child-folders", Boolean(childFolders));
+  if (!assets.length) {
+    els.assetGrid.innerHTML = `${childFolders}<div class="empty-state"><h3>${state.view === "trash" ? "回收站是空的" : "这里还没有图片"}</h3><p>${state.view === "trash" ? "删除的素材会在这里保留一段时间。" : "直接 Ctrl+V 粘贴图片。"}</p></div>`;
+    return;
+  }
+  const groupByAssetId = new Map();
+  folderGroups.forEach((group) => {
+    (group.assetIds || []).forEach((assetId) => {
+      if (!groupByAssetId.has(assetId)) groupByAssetId.set(assetId, group);
+    });
+  });
+  const visibleAssetsByGroup = new Map(folderGroups.map((group) => [
+    group.id,
+    assets.filter((asset) => (group.assetIds || []).includes(asset.id))
+  ]));
+  const renderedGroups = new Set();
+  const cards = assets.map((asset) => {
+    const group = groupByAssetId.get(asset.id);
+    if (!group) return renderAssetCard(asset);
+    if (renderedGroups.has(group.id)) return "";
+    renderedGroups.add(group.id);
+    return renderAssetGroupStack(group, visibleAssetsByGroup.get(group.id) || []);
+  }).join("");
+  els.assetGrid.innerHTML = `${childFolders}${cards}`;
 }
 
 function renderInternalBoards() {
@@ -720,8 +1057,9 @@ function renderInternalBoards() {
 }
 
 function renderBoardItem(item, boardId) {
-  const asset = getAsset(item.assetId);
-  if (!asset) return "";
+  const isText = item.type === "text";
+  const asset = isText ? null : getAsset(item.assetId);
+  if (!isText && !asset) return "";
   const selectedIds = state.selectedInternalBoardItemIds.length
     ? state.selectedInternalBoardItemIds
     : state.selectedInternalBoardItemId
@@ -731,12 +1069,15 @@ function renderBoardItem(item, boardId) {
   const singleSelected = selected && selectedIds.length === 1;
   const flipX = item.flipX ? -1 : 1;
   const flipY = item.flipY ? -1 : 1;
+  const size = boardItemSize(getBoard(boardId), item);
   return `
-    <div class="board-item ${selected ? "selected" : ""}" data-board-item="${escapeHtml(item.id)}" style="left:${item.x || 0}px; top:${item.y || 0}px; width:${Math.max(60, item.width || 260)}px; transform: rotate(${item.rotation || 0}deg);">
+    <div class="board-item ${isText ? "board-text-item" : ""} ${selected ? "selected" : ""}" data-board-item="${escapeHtml(item.id)}" style="left:${item.x || 0}px; top:${item.y || 0}px; width:${size.width}px;${isText ? ` height:${size.height}px;` : ""} transform: rotate(${item.rotation || 0}deg);">
       <div class="board-item-inner" style="transform: scale(${flipX}, ${flipY});">
-        <img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />
+        ${isText
+          ? `<div class="board-text-content">${escapeHtml(item.text || "文字")}</div>`
+          : `<img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />`}
       </div>
-      ${singleSelected ? `<button class="rotate-handle" data-board-handle="rotate"></button>
+      ${singleSelected && !isText ? `<button class="rotate-handle" data-board-handle="rotate"></button>
         <button class="resize-handle" data-board-handle="resize"></button>
       ` : ""}
     </div>
@@ -758,6 +1099,17 @@ function renderBoardSelectionBox(board) {
 }
 
 function renderInspector() {
+  if (state.workspaceMode === "assets" && state.view === "notes") {
+    const note = getNotePage();
+    els.assetInfo.innerHTML = note ? `
+      <div class="note-inspector-summary">
+        <strong>${escapeHtml(note.title || "未命名笔记")}</strong>
+        <span>${escapeHtml(note.paper || "plain")} · ${escapeHtml(note.fontFamily || "Microsoft YaHei")} · ${Number(note.fontSize) || 18} px</span>
+        <p>拖动笔记空白处可移动，拖动右下角可调整大小。</p>
+      </div>
+    ` : `<div class="empty-info">选择一张笔记后，这里会显示笔记信息。</div>`;
+    return;
+  }
   const selectedCardId = els.assetGrid?.querySelector(".asset-card.selected")?.dataset.asset || "";
   const selected = getAsset(state.selectedAssetId) || getAsset(selectedCardId);
   if (!selected) {
@@ -828,6 +1180,35 @@ function showFolderContextMenu(folderId, event) {
   els.folderContextMenu.classList.remove("hidden");
 }
 
+function showAssetSelectionContextMenu(event) {
+  const count = state.selectedAssetIds.length;
+  if (!state.currentFolderId || count < 2) return false;
+  els.folderContextMenu.innerHTML = `
+    <button data-create-group-from-selection>将所选 ${count} 张图片建组</button>
+  `;
+  const x = Math.min(event.clientX, window.innerWidth - 220);
+  const y = Math.min(event.clientY, window.innerHeight - 64);
+  els.folderContextMenu.style.left = `${Math.max(8, x)}px`;
+  els.folderContextMenu.style.top = `${Math.max(8, y)}px`;
+  els.folderContextMenu.classList.remove("hidden");
+  return true;
+}
+
+function showGroupContextMenu(groupId, event) {
+  const group = getGroup(groupId);
+  if (!group) return;
+  els.folderContextMenu.innerHTML = `
+    <button data-rename-group="${escapeHtml(group.id)}">重命名</button>
+    <button data-toggle-group="${escapeHtml(group.id)}">${group.collapsed ? "展开组" : "收起组"}</button>
+    <button class="danger" data-delete-group="${escapeHtml(group.id)}">删除组</button>
+  `;
+  const x = Math.min(event.clientX, window.innerWidth - 176);
+  const y = Math.min(event.clientY, window.innerHeight - 116);
+  els.folderContextMenu.style.left = `${Math.max(8, x)}px`;
+  els.folderContextMenu.style.top = `${Math.max(8, y)}px`;
+  els.folderContextMenu.classList.remove("hidden");
+}
+
 function hideFolderContextMenu() {
   els.folderContextMenu.classList.add("hidden");
 }
@@ -858,8 +1239,11 @@ async function createFolder(parentId = "") {
   state.activeBoardId = "";
   setInternalBoardSelection([]);
   state.currentFolderId = next.folders[0]?.id || "";
+  state.renamingFolderId = state.currentFolderId;
+  if (parentId) state.expandedFolderIds.add(parentId);
   state.view = "all";
   render();
+  focusFolderRenameInput(state.currentFolderId);
 }
 
 async function createBoard() {
@@ -1102,13 +1486,69 @@ async function deleteSelectedInternalBoardItem() {
   await saveBoard(board);
 }
 
+async function addTextToInternalBoard(boardId, text, point) {
+  const board = getBoard(boardId);
+  const value = String(text || "").trim();
+  if (!board || !value) return;
+  rememberInternalBoard(board);
+  const item = {
+    id: window.crypto.randomUUID(),
+    type: "text",
+    text: value,
+    x: point.x,
+    y: point.y,
+    width: Math.max(140, Math.min(720, Array.from(value).length * 30 + 28)),
+    height: 56,
+    rotation: 0
+  };
+  board.items.push(item);
+  setInternalBoardSelection([item.id]);
+  await saveBoard(board);
+}
+
+function openInternalBoardTextInput(board) {
+  const area = getInternalBoardArea(board.id);
+  if (!area) return;
+  document.querySelector(".board-text-entry")?.remove();
+  const remembered = state.internalBoardPointer?.boardId === board.id ? state.internalBoardPointer.point : null;
+  const point = remembered || getInternalBoardPastePoint(board);
+  const input = document.createElement("input");
+  input.className = "board-text-entry";
+  input.type = "text";
+  input.placeholder = "输入文字，按 Enter 放入画板";
+  input.setAttribute("aria-label", "画板文字");
+  const screenX = point.x * board.viewport.scale + board.viewport.x;
+  const screenY = point.y * board.viewport.scale + board.viewport.y;
+  input.style.left = `${Math.max(12, Math.min(area.clientWidth - 332, screenX))}px`;
+  input.style.top = `${Math.max(12, Math.min(area.clientHeight - 52, screenY))}px`;
+  input.addEventListener("pointerdown", (event) => event.stopPropagation());
+  input.addEventListener("keydown", async (event) => {
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      input.remove();
+      return;
+    }
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    const value = input.value;
+    input.remove();
+    await addTextToInternalBoard(board.id, value, point);
+    renderInternalBoards();
+  });
+  input.addEventListener("blur", () => setTimeout(() => input.remove(), 0));
+  area.appendChild(input);
+  input.focus();
+}
+
 async function copySelectedInternalBoardItem() {
   const board = getBoard(state.activeBoardId);
   const selected = getSelectedInternalBoardItems(board);
   if (!selected.length) return;
   const items = selected.map((item) => clone(item));
   state.internalBoardClipboard = { items };
-  const result = await api.writeAssetToClipboard?.(items[0].assetId);
+  const imageItem = items.find((item) => item.assetId);
+  const result = imageItem ? await api.writeAssetToClipboard?.(imageItem.assetId) : null;
   state.internalBoardClipboardHash = result?.hash || "";
   await api.writeBoardClipboard?.({ items, hash: state.internalBoardClipboardHash });
 }
@@ -1132,7 +1572,8 @@ async function pasteInternalBoardItem() {
   }));
   board.items.push(...pasted);
   state.internalBoardClipboard = { items: pasted.map((item) => clone(item)) };
-  const result = await api.writeAssetToClipboard?.(pasted[0].assetId);
+  const imageItem = pasted.find((item) => item.assetId);
+  const result = imageItem ? await api.writeAssetToClipboard?.(imageItem.assetId) : null;
   state.internalBoardClipboardHash = result?.hash || state.internalBoardClipboardHash;
   await api.writeBoardClipboard?.({ items: state.internalBoardClipboard.items, hash: state.internalBoardClipboardHash });
   setInternalBoardSelection(pasted.map((item) => item.id));
@@ -1234,6 +1675,28 @@ els.clearBtn.addEventListener("click", async () => {
   if (confirm("\u6e05\u9664\u5f53\u524d\u56fe\u7247\u7684\u5168\u90e8\u6279\u6ce8\uff1f")) await persistAnnotations([]);
 });
 document.addEventListener("paste", async (event) => {
+  const noteEditor = event.target.closest?.("[data-note-content]");
+  if (noteEditor) {
+    let files = getPasteEventFiles(event);
+    const plainText = event.clipboardData?.getData("text/plain");
+    if (!files.length && !plainText) {
+      event.preventDefault();
+      const clipboardEntries = await readClipboardImageFiles();
+      files = clipboardEntries.map((entry) => entry.file);
+    }
+    if (files.length) {
+      event.preventDefault();
+      await pasteImagesIntoNote(noteEditor, files);
+      return;
+    }
+    if (plainText) {
+      event.preventDefault();
+      const selection = window.getSelection();
+      if (selection?.rangeCount) insertNodeAtRange(selection.getRangeAt(0), document.createTextNode(plainText));
+      scheduleNoteContentSave(noteEditor);
+    }
+    return;
+  }
   if (event.target.closest?.("input, textarea, select, [contenteditable='true']")) return;
   if (state.suppressNextPasteEvent) {
     state.suppressNextPasteEvent = false;
@@ -1268,6 +1731,8 @@ document.addEventListener("dragover", (event) => {
 
 document.addEventListener("dragleave", (event) => {
   if (!event.relatedTarget) document.body.classList.remove("drag-active");
+  const groupTarget = event.target.closest?.(".asset-group-stack, .asset-card, .collapsed-group-card");
+  if (groupTarget && !groupTarget.contains(event.relatedTarget)) groupTarget.classList.remove("group-drop-active");
 });
 
 document.addEventListener("drop", async (event) => {
@@ -1302,6 +1767,41 @@ document.addEventListener("change", async (event) => {
     return;
   }
 
+  const groupPicker = event.target.closest("[data-asset-group-select]");
+  if (groupPicker) {
+    setLibrary(await api.setAssetGroup(state.currentFolderId, groupPicker.dataset.assetGroupSelect, groupPicker.value));
+    return;
+  }
+
+  const groupColor = event.target.closest("[data-group-color]");
+  if (groupColor) {
+    setLibrary(await api.updateGroup(groupColor.dataset.groupColor, { color: groupColor.value }));
+    return;
+  }
+
+  const noteSetting = event.target.closest("[data-note-setting]");
+  if (noteSetting && state.selectedNoteId) {
+    await flushNoteContentSave(state.selectedNoteId);
+    const key = noteSetting.dataset.noteSetting;
+    const value = key === "fontSize" ? Number(noteSetting.value) : noteSetting.value;
+    setLibrary(await api.updateNotePage(state.selectedNoteId, { [key]: value }));
+    return;
+  }
+
+  const noteTitle = event.target.closest("[data-note-title]");
+  if (noteTitle) {
+    const next = await api.updateNotePage(noteTitle.dataset.noteTitle, { title: noteTitle.value.trim() || "未命名笔记" });
+    setLibrary(next);
+    return;
+  }
+
+  const noteText = event.target.closest("[data-note-text]");
+  if (noteText) {
+    const next = await api.updateNotePage(noteText.dataset.noteText, { text: noteText.value });
+    setLibrary(next);
+    return;
+  }
+
   const membership = event.target.closest("[data-folder-membership]");
   if (!membership) return;
   setLibrary(await api.setFolderMembership(
@@ -1324,6 +1824,13 @@ document.addEventListener("dragstart", (event) => {
 });
 
 document.addEventListener("dragover", (event) => {
+  const groupDrop = event.target.closest("[data-group-drop]");
+  if (groupDrop && event.dataTransfer?.types?.includes("text/asset-id")) {
+    event.preventDefault();
+    groupDrop.closest(".asset-group-stack, .asset-card, .collapsed-group-card")?.classList.add("group-drop-active");
+    event.dataTransfer.dropEffect = "move";
+    return;
+  }
   const area = event.target.closest("[data-board-area]");
   if (!area) return;
   event.preventDefault();
@@ -1331,6 +1838,15 @@ document.addEventListener("dragover", (event) => {
 });
 
 document.addEventListener("drop", async (event) => {
+  const groupDrop = event.target.closest("[data-group-drop]");
+  const groupedAssetId = event.dataTransfer.getData("text/asset-id");
+  if (groupDrop && groupedAssetId && state.currentFolderId) {
+    event.preventDefault();
+    event.stopPropagation();
+    document.querySelectorAll(".group-drop-active").forEach((item) => item.classList.remove("group-drop-active"));
+    setLibrary(await api.setAssetGroup(state.currentFolderId, groupedAssetId, groupDrop.dataset.groupDrop));
+    return;
+  }
   const area = event.target.closest("[data-board-area]");
   if (!area) return;
   const board = getBoard(area.dataset.boardArea);
@@ -1344,9 +1860,40 @@ document.addEventListener("drop", async (event) => {
   else await importFilesToInternalBoard(board.id, event.dataTransfer?.files || [], point);
 });
 
+document.addEventListener("input", (event) => {
+  const noteEditor = event.target.closest?.("[data-note-content]");
+  if (noteEditor) scheduleNoteContentSave(noteEditor);
+});
+
 document.addEventListener("contextmenu", (event) => {
+  const assetCard = event.target.closest("[data-asset]");
+  const groupHeader = event.target.closest("[data-asset-group-meta]");
   const folderLink = event.target.closest("[data-folder]");
   const boardLink = event.target.closest("[data-board]");
+  if (groupHeader) {
+    const groupId = groupHeader.closest("[data-asset-group]")?.dataset.assetGroup;
+    if (groupId) {
+      event.preventDefault();
+      hideBoardContextMenu();
+      showGroupContextMenu(groupId, event);
+      return;
+    }
+  }
+  if (assetCard) {
+    const assetId = assetCard.dataset.asset;
+    if (!state.selectedAssetIds.includes(assetId)) {
+      state.selectedAssetIds = [assetId];
+      state.selectedAssetId = assetId;
+      document.querySelectorAll("[data-asset]").forEach((card) => {
+        card.classList.toggle("selected", card.dataset.asset === assetId);
+      });
+    }
+    if (showAssetSelectionContextMenu(event)) {
+      event.preventDefault();
+      hideBoardContextMenu();
+      return;
+    }
+  }
   if (folderLink) {
     event.preventDefault();
     hideBoardContextMenu();
@@ -1364,6 +1911,15 @@ document.addEventListener("contextmenu", (event) => {
 });
 
 document.addEventListener("dblclick", (event) => {
+  const groupName = event.target.closest("[data-group-name]");
+  if (groupName) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.renamingGroupId = groupName.dataset.groupName;
+    renderAssetGrid();
+    focusGroupRenameInput(state.renamingGroupId);
+    return;
+  }
   const folderName = event.target.closest("[data-folder] .folder-name");
   if (folderName) {
     const folderLink = folderName.closest("[data-folder]");
@@ -1385,6 +1941,18 @@ document.addEventListener("dblclick", (event) => {
     focusBoardRenameInput(state.renamingBoardId);
   }
 });
+
+document.addEventListener("focusout", (event) => {
+  const groupInput = event.target.closest?.("[data-group-name-input]");
+  if (groupInput) {
+    queueMicrotask(() => commitGroupRename(groupInput));
+    return;
+  }
+  const folderInput = event.target.closest?.("[data-folder-name-input]");
+  if (folderInput) queueMicrotask(() => commitFolderRename(folderInput));
+});
+
+document.addEventListener("pointerdown", commitInlineRenameBeforePointerAction, true);
 
 document.addEventListener("click", async (event) => {
   if (event.target.closest(".brand-mark")) {
@@ -1454,6 +2022,105 @@ document.addEventListener("click", async (event) => {
     state.view = nav.dataset.view;
     state.currentFolderId = "";
     render();
+    return;
+  }
+
+  const createNoteButton = event.target.closest("[data-create-note]");
+  if (createNoteButton) {
+    await flushAllNoteContentSaves();
+    const result = await api.createNotePage();
+    state.selectedNoteId = result.noteId;
+    state.view = "notes";
+    state.workspaceMode = "assets";
+    setLibrary(result.state);
+    return;
+  }
+
+  const noteLink = event.target.closest("[data-note-link]");
+  if (noteLink) {
+    state.workspaceMode = "assets";
+    state.view = "notes";
+    state.currentFolderId = "";
+    state.selectedNoteId = noteLink.dataset.noteLink;
+    render();
+    return;
+  }
+
+  const createGroupFromSelection = event.target.closest("[data-create-group-from-selection]");
+  if (createGroupFromSelection) {
+    hideFolderContextMenu();
+    const result = await api.createGroupFromAssets(state.currentFolderId, state.selectedAssetIds);
+    if (!result) return;
+    state.selectedAssetIds = [];
+    state.selectedAssetId = "";
+    state.renamingGroupId = result.groupId;
+    setLibrary(result.state);
+    renderAssetGrid();
+    focusGroupRenameInput(result.groupId);
+    return;
+  }
+
+  const deleteNoteButton = event.target.closest("[data-delete-note]");
+  if (deleteNoteButton) {
+    await flushAllNoteContentSaves();
+    const note = getNotePage(deleteNoteButton.dataset.deleteNote);
+    if (note && confirm(`确定删除这张笔记吗？\n\n${note.title || "未命名笔记"}`)) {
+      state.selectedNoteId = "";
+      setLibrary(await api.deleteNotePage(note.id));
+    }
+    return;
+  }
+
+  const groupMore = event.target.closest("[data-group-more]");
+  if (groupMore) {
+    const rect = groupMore.getBoundingClientRect();
+    showGroupContextMenu(groupMore.dataset.groupMore, { clientX: rect.right, clientY: rect.bottom });
+    return;
+  }
+
+  const renameGroupButton = event.target.closest("[data-rename-group]");
+  if (renameGroupButton) {
+    hideFolderContextMenu();
+    state.renamingGroupId = renameGroupButton.dataset.renameGroup;
+    renderAssetGrid();
+    focusGroupRenameInput(state.renamingGroupId);
+    return;
+  }
+
+  const toggleGroupButton = event.target.closest("[data-toggle-group]");
+  if (toggleGroupButton) {
+    hideFolderContextMenu();
+    const group = getGroup(toggleGroupButton.dataset.toggleGroup);
+    if (group) setLibrary(await api.updateGroup(group.id, { collapsed: !group.collapsed }));
+    return;
+  }
+
+  const saveGroupName = event.target.closest("[data-save-group-name]");
+  if (saveGroupName) {
+    const groupId = saveGroupName.dataset.saveGroupName;
+    const input = document.querySelector(`[data-group-name-input="${CSS.escape(groupId)}"]`);
+    if (input?.value.trim()) {
+      state.renamingGroupId = "";
+      setLibrary(await api.updateGroup(groupId, { name: input.value.trim() }));
+    }
+    return;
+  }
+
+  const cancelGroupName = event.target.closest("[data-cancel-group-name]");
+  if (cancelGroupName) {
+    state.renamingGroupId = "";
+    renderAssetGrid();
+    return;
+  }
+
+  const deleteGroupButton = event.target.closest("[data-delete-group]");
+  if (deleteGroupButton) {
+    hideFolderContextMenu();
+    const group = getGroup(deleteGroupButton.dataset.deleteGroup);
+    if (group && confirm(`确定删除这个组吗？\n\n${group.name}\n\n组内图片不会被删除，只会回到“未分组”。`)) {
+      setLibrary(await api.deleteGroup(group.id));
+    }
+    return;
   }
 
   const renameFolderButton = event.target.closest("[data-rename-folder]");
@@ -1553,14 +2220,42 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const folderTreeToggle = event.target.closest("[data-toggle-folder-tree]");
+  if (folderTreeToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    const folderId = folderTreeToggle.dataset.toggleFolderTree;
+    if (state.expandedFolderIds.has(folderId)) state.expandedFolderIds.delete(folderId);
+    else state.expandedFolderIds.add(folderId);
+    renderNavigation();
+    return;
+  }
+
   const folderLink = event.target.closest("[data-folder]");
   if (folderLink && !event.target.closest("[data-rename-folder]") && !event.target.closest("[data-delete-folder]") && !event.target.closest("[data-new-child-folder]")) {
+    if (event.detail >= 2 && event.target.closest(".folder-name")) {
+      state.renamingFolderId = folderLink.dataset.folder;
+      renderNavigation();
+      focusFolderRenameInput(state.renamingFolderId);
+      return;
+    }
     state.workspaceMode = "assets";
     state.activeBoardId = "";
     setInternalBoardSelection([]);
     state.currentFolderId = folderLink.dataset.folder;
     state.view = "all";
     render();
+    return;
+  }
+
+  const childFolder = event.target.closest("[data-open-child-folder]");
+  if (childFolder) {
+    state.workspaceMode = "assets";
+    state.currentFolderId = childFolder.dataset.openChildFolder;
+    state.view = "all";
+    state.selectedAssetIds = [];
+    render();
+    return;
   }
 
   const boardLink = event.target.closest("[data-board]");
@@ -1570,8 +2265,16 @@ document.addEventListener("click", async (event) => {
   }
 
   const card = event.target.closest("[data-asset]");
-  if (card && !event.target.closest("[data-favorite]") && !event.target.closest("[data-folder-menu]")) {
-    state.selectedAssetId = card.dataset.asset;
+  if (card && !event.target.closest("[data-favorite]") && !event.target.closest("[data-folder-menu]") && !event.target.closest("[data-asset-group-select]") && !event.target.closest("[data-asset-group-meta]")) {
+    const assetId = card.dataset.asset;
+    if (event.ctrlKey || event.metaKey || event.shiftKey) {
+      state.selectedAssetIds = state.selectedAssetIds.includes(assetId)
+        ? state.selectedAssetIds.filter((id) => id !== assetId)
+        : [...state.selectedAssetIds, assetId];
+    } else {
+      state.selectedAssetIds = [assetId];
+    }
+    state.selectedAssetId = state.selectedAssetIds.at(-1) || "";
     if (event.detail === 2) openViewer(card.dataset.asset);
     render();
     return;
@@ -1636,15 +2339,35 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("wheel", async (event) => {
   const area = event.target.closest?.("[data-board-area]");
   if (!area) return;
+  if (state.internalBoardPanning) {
+    event.preventDefault();
+    return;
+  }
   const board = getBoard(area.dataset.boardArea);
   if (!board) return;
   event.preventDefault();
   zoomBoardAtPoint(board, area, event.clientX, event.clientY, event.deltaY);
   renderInternalBoards();
-  await api.saveBoard(board);
+  await saveBoard(board);
 }, { passive: false });
 
 document.addEventListener("pointerdown", (event) => {
+  const assetSurface = event.target.closest?.("#assetGrid");
+  const blockedAssetSelection = event.target.closest?.("[data-asset], [data-asset-group-meta], button, input, textarea, select, [data-note-page], .child-folder-tile");
+  if (assetSurface && !blockedAssetSelection && event.button === 0 && state.workspaceMode === "assets" && state.view !== "notes") {
+    const box = document.createElement("div");
+    box.className = "asset-selection-box";
+    document.body.appendChild(box);
+    state.assetSelection = {
+      start: { x: event.clientX, y: event.clientY },
+      current: { x: event.clientX, y: event.clientY },
+      box
+    };
+    if (!event.ctrlKey && !event.metaKey) state.selectedAssetIds = [];
+    event.preventDefault();
+    return;
+  }
+
   const draggableTab = event.target.closest("[data-detachable-board-tab]");
   if (draggableTab && event.button === 0 && !event.target.closest("[data-close-board-tab]")) {
     state.boardTabDrag = {
@@ -1686,9 +2409,21 @@ document.addEventListener("pointerdown", (event) => {
   if (event.button === 1) {
     event.preventDefault();
     setInternalBoardSelection([]);
-    state.internalBoardPanning = true;
-    state.internalBoardPanStart = { x: event.clientX - board.viewport.x, y: event.clientY - board.viewport.y };
-    renderInternalBoards();
+    state.internalBoardInteraction = null;
+    state.internalBoardSelection = null;
+    state.internalBoardPanning = {
+      boardId: board.id,
+      board,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: board.viewport.x,
+      originY: board.viewport.y,
+      area,
+      canvas: area.querySelector(".board-canvas")
+    };
+    area.classList.add("panning");
+    area.setPointerCapture?.(event.pointerId);
     return;
   }
 
@@ -1707,18 +2442,19 @@ document.addEventListener("pointerdown", (event) => {
     rememberInternalBoard(board);
     renderInternalBoards();
     if (handle?.dataset.boardHandle === "resize") {
-      state.internalBoardInteraction = { type: "resize", boardId: board.id, item, startX: event.clientX, originWidth: item.width || 260 };
+      state.internalBoardInteraction = { type: "resize", boardId: board.id, board, item, startX: event.clientX, originWidth: item.width || 260 };
       return;
     }
     if (handle?.dataset.boardHandle === "rotate") {
       const rect = itemEl.getBoundingClientRect();
-      state.internalBoardInteraction = { type: "rotate", boardId: board.id, item, centerX: rect.left + rect.width / 2, centerY: rect.top + rect.height / 2 };
+      state.internalBoardInteraction = { type: "rotate", boardId: board.id, board, item, centerX: rect.left + rect.width / 2, centerY: rect.top + rect.height / 2 };
       return;
     }
     const movingItems = getSelectedInternalBoardItems(board);
     state.internalBoardInteraction = {
       type: "move",
       boardId: board.id,
+      board,
       item,
       items: movingItems.map((entry) => ({
         item: entry,
@@ -1746,6 +2482,37 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 window.addEventListener("pointermove", (event) => {
+  const hoveredBoardArea = event.target.closest?.("[data-board-area]");
+  if (hoveredBoardArea) {
+    const hoveredBoard = getBoard(hoveredBoardArea.dataset.boardArea);
+    if (hoveredBoard) {
+      state.internalBoardPointer = {
+        boardId: hoveredBoard.id,
+        point: boardPointFromEvent(event, hoveredBoard)
+      };
+    }
+  }
+  if (state.assetSelection) {
+    state.assetSelection.current = { x: event.clientX, y: event.clientY };
+    const rect = normalizeRect(state.assetSelection.start, state.assetSelection.current);
+    Object.assign(state.assetSelection.box.style, {
+      left: `${rect.x}px`,
+      top: `${rect.y}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`
+    });
+    const selected = [...document.querySelectorAll("[data-asset]")]
+      .filter((card) => {
+        const cardRect = card.getBoundingClientRect();
+        return rect.x < cardRect.right && rect.x + rect.width > cardRect.left && rect.y < cardRect.bottom && rect.y + rect.height > cardRect.top;
+      })
+      .map((card) => card.dataset.asset);
+    state.selectedAssetIds = selected;
+    state.selectedAssetId = selected.at(-1) || "";
+    document.querySelectorAll("[data-asset]").forEach((card) => card.classList.toggle("selected", selected.includes(card.dataset.asset)));
+    return;
+  }
+
   if (state.boardTabDrag) {
     const drag = state.boardTabDrag;
     const distanceY = Math.abs(event.clientY - drag.startY);
@@ -1759,6 +2526,17 @@ window.addEventListener("pointermove", (event) => {
       document.body.classList.remove("drag-active");
       detachBoardToFloating(drag.boardId);
     }
+    return;
+  }
+
+  if (state.internalBoardPanning) {
+    const pan = state.internalBoardPanning;
+    if (event.pointerId !== pan.pointerId) return;
+    const board = getBoard(pan.boardId);
+    if (!board) return;
+    board.viewport.x = Math.round(pan.originX + event.clientX - pan.startX);
+    board.viewport.y = Math.round(pan.originY + event.clientY - pan.startY);
+    if (pan.canvas?.isConnected) pan.canvas.style.transform = `translate(${board.viewport.x}px, ${board.viewport.y}px) scale(${board.viewport.scale})`;
     return;
   }
 
@@ -1802,14 +2580,6 @@ window.addEventListener("pointermove", (event) => {
     return;
   }
 
-  if (state.internalBoardPanning) {
-    const board = getBoard(state.activeBoardId);
-    if (!board) return;
-    board.viewport.x = event.clientX - state.internalBoardPanStart.x;
-    board.viewport.y = event.clientY - state.internalBoardPanStart.y;
-    renderInternalBoards();
-  }
-
   if (state.internalBoardSelection) {
     const board = getBoard(state.internalBoardSelection.boardId);
     if (!board) return;
@@ -1823,17 +2593,43 @@ window.addEventListener("pointermove", (event) => {
   }
 });
 
-window.addEventListener("pointerup", async () => {
+window.addEventListener("pointerup", async (event) => {
+  if (state.assetSelection) {
+    state.assetSelection.box.remove();
+    state.assetSelection = null;
+    renderInspector();
+    return;
+  }
+  if (state.internalBoardPanning) {
+    const pan = state.internalBoardPanning;
+    if (event.pointerId !== pan.pointerId) return;
+    pan.area?.classList.remove("panning");
+    if (pan.area?.hasPointerCapture?.(pan.pointerId)) pan.area.releasePointerCapture(pan.pointerId);
+    const pannedBoard = pan.board || getBoard(pan.boardId);
+    if (pannedBoard) await saveBoard(pannedBoard);
+    state.internalBoardPanning = null;
+    return;
+  }
   const op = state.internalBoardInteraction;
-  const board = getBoard(state.activeBoardId);
-  if (op && op.type !== "window") await saveBoard(getBoard(op.boardId));
-  if (state.internalBoardPanning && board) await saveBoard(board);
+  if (op && op.type !== "window") await saveBoard(op.board || getBoard(op.boardId));
   const hadSelectionBox = Boolean(state.internalBoardSelection);
   if (state.internalBoardSelection) state.internalBoardSelection = null;
   state.boardTabDrag = null;
   state.internalBoardInteraction = null;
-  state.internalBoardPanning = false;
   if (hadSelectionBox) renderInternalBoards();
+});
+
+window.addEventListener("pointercancel", async (event) => {
+  if (state.assetSelection) {
+    state.assetSelection.box.remove();
+    state.assetSelection = null;
+  }
+  const pan = state.internalBoardPanning;
+  if (!pan || event.pointerId !== pan.pointerId) return;
+  pan.area?.classList.remove("panning");
+  const board = pan.board || getBoard(pan.boardId);
+  if (board) await saveBoard(board);
+  state.internalBoardPanning = null;
 });
 
 els.viewer.addEventListener("wheel", (event) => {
@@ -1930,18 +2726,24 @@ window.addEventListener("keydown", async (event) => {
 
   if (event.target.closest?.(".settings-panel")) return;
 
+  const groupRenameInput = event.target.closest?.("[data-group-name-input]");
+  if (groupRenameInput) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      await commitGroupRename(groupRenameInput);
+    }
+    if (event.key === "Escape") {
+      state.renamingGroupId = "";
+      renderAssetGrid();
+    }
+    return;
+  }
+
   const renameInput = event.target.closest?.("[data-folder-name-input]");
   if (renameInput) {
     if (event.key === "Enter") {
-      const folderId = renameInput.dataset.folderNameInput;
-      const nextName = renameInput.value.trim();
-      if (nextName) {
-        const next = await api.renameFolder(folderId, nextName);
-        state.renamingFolderId = "";
-        setLibrary(next);
-        state.currentFolderId = folderId;
-        render();
-      }
+      event.preventDefault();
+      await commitFolderRename(renameInput);
     }
     if (event.key === "Escape") {
       state.renamingFolderId = "";
@@ -1969,6 +2771,12 @@ window.addEventListener("keydown", async (event) => {
     return;
   }
 
+  if (state.viewerAssetId && event.key === "Escape") {
+    event.preventDefault();
+    closeViewer();
+    return;
+  }
+
   const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
   if (typing) return;
 
@@ -1978,13 +2786,18 @@ window.addEventListener("keydown", async (event) => {
       await undoAnnotation();
       return;
     }
-    if (event.key === "Escape") closeViewer();
     if (event.key === "ArrowLeft") goViewer(-1);
     if (event.key === "ArrowRight") goViewer(1);
     return;
   }
 
   if (state.activeBoardId && state.openBoardIds.includes(state.activeBoardId)) {
+    if (event.key.toLowerCase() === "t" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      const board = getBoard(state.activeBoardId);
+      if (board) openInternalBoardTextInput(board);
+      return;
+    }
     if (matchesShortcut(event, "undo")) {
       event.preventDefault();
       await undoInternalBoard();
@@ -2039,6 +2852,16 @@ api.onBoardReturned((boardId) => {
   state.activeBoardId = boardId;
   setInternalBoardSelection([]);
   render();
+});
+api.onPrepareToClose?.(async () => {
+  clearPendingInternalBoardPaste();
+  await flushAllNoteContentSaves();
+  const boardsToFlush = getBoardsForClose();
+  await state.pendingBoardSave.catch(() => {});
+  if (boardsToFlush.length) await api.saveBoards(boardsToFlush);
+});
+window.addEventListener("beforeunload", () => {
+  api.flushBoardsSync?.(getBoardsForClose());
 });
 applyAppSettings();
 api.getLibrary().then(setLibrary);

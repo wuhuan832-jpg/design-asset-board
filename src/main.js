@@ -3,9 +3,9 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
-const { pathToFileURL } = require("url");
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"]);
+const GROUP_COLORS = ["#9A4F60", "#2F8F73", "#6952A3", "#C45F3D", "#287EA3"];
 app.setName("素材板");
 if (!app.isPackaged) app.setPath("userData", path.join(__dirname, "..", ".user-data"));
 app.disableHardwareAcceleration();
@@ -18,9 +18,11 @@ const DEFAULT_STATE = {
   boardAssets: [],
   recycleBin: [],
   folders: [],
+  groups: [],
   boards: [],
   annotations: {},
   notes: [],
+  notePages: [],
   mindMaps: [],
   settings: {
     libraryPath: "",
@@ -38,6 +40,10 @@ let importing = false;
 let boardClipboard = null;
 const boardWindows = new Map();
 let currentWindowTheme = "palette-b";
+let stateWriteQueue = Promise.resolve();
+let appQuitInProgress = false;
+let appQuitReady = false;
+const rendererFlushRequests = new Map();
 
 const WINDOW_THEMES = {
   "palette-b": { background: "#eadfde", symbol: "#3a2d2b" },
@@ -71,6 +77,34 @@ function applyWindowThemeToAll(themeName = currentWindowTheme) {
   currentWindowTheme = themeName;
   applyWindowTheme(mainWindow, themeName);
   for (const win of boardWindows.values()) applyWindowTheme(win, themeName);
+}
+
+function requestRendererFlush(win, timeoutMs = 5000) {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.resolve();
+  const token = crypto.randomUUID();
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      rendererFlushRequests.delete(token);
+      resolve();
+    }, timeoutMs);
+    rendererFlushRequests.set(token, () => {
+      clearTimeout(timeout);
+      rendererFlushRequests.delete(token);
+      resolve();
+    });
+    win.webContents.send("app:prepare-to-close", token);
+  });
+}
+
+async function beginGracefulQuit() {
+  if (appQuitInProgress || appQuitReady) return;
+  appQuitInProgress = true;
+  const windows = BrowserWindow.getAllWindows().filter((win) => !win.isDestroyed());
+  await Promise.all(windows.map((win) => requestRendererFlush(win)));
+  await saveState();
+  await stateWriteQueue;
+  appQuitReady = true;
+  app.quit();
 }
 
 function isBoardWindowOverMainTabs(win) {
@@ -114,8 +148,6 @@ function getAppIconPath() {
 
 function createWindow() {
   const rendererEntry = path.join(__dirname, "renderer", "index.html");
-  const rendererUrl = pathToFileURL(rendererEntry).toString();
-
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -141,13 +173,18 @@ function createWindow() {
   applyWindowTheme(mainWindow);
 
   Menu.setApplicationMenu(null);
-  mainWindow.loadFile(rendererEntry);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (url !== rendererUrl) event.preventDefault();
+    if (!url.startsWith("file:")) event.preventDefault();
   });
   mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
     callback(false);
+  });
+  mainWindow.loadFile(rendererEntry);
+  mainWindow.on("close", (event) => {
+    if (appQuitReady) return;
+    event.preventDefault();
+    beginGracefulQuit();
   });
 }
 
@@ -205,6 +242,19 @@ function createBoardWindow(boardId) {
   win.on("move", () => {
     if (canReturnToMain && isBoardWindowOverMainTabs(win)) returnBoardToMain(boardId, win);
   });
+  let closeReady = false;
+  let closePending = false;
+  win.on("close", (event) => {
+    if (appQuitReady || closeReady) return;
+    event.preventDefault();
+    if (closePending) return;
+    closePending = true;
+    requestRendererFlush(win).then(async () => {
+      await stateWriteQueue;
+      closeReady = true;
+      if (!win.isDestroyed()) win.close();
+    });
+  });
   win.on("closed", () => boardWindows.delete(boardId));
 }
 
@@ -218,8 +268,17 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
   if (importWatcher) importWatcher.close();
+  if (!appQuitReady && mainWindow && !mainWindow.isDestroyed()) {
+    event.preventDefault();
+    beginGracefulQuit();
+  }
+});
+
+
+ipcMain.on("app:close-ready", (_event, token) => {
+  rendererFlushRequests.get(token)?.();
 });
 
 function cloneState() {
@@ -229,6 +288,20 @@ function cloneState() {
 function normalizeAssetFolders(asset) {
   if (Array.isArray(asset.folderIds)) return asset.folderIds;
   return asset.folderId ? [asset.folderId] : [];
+}
+
+function folderLineageIds(folderId) {
+  const ids = [];
+  const visited = new Set();
+  let currentId = folderId;
+  while (currentId && !visited.has(currentId)) {
+    const folder = state.folders.find((item) => item.id === currentId);
+    if (!folder) break;
+    ids.push(folder.id);
+    visited.add(folder.id);
+    currentId = folder.parentId || "";
+  }
+  return ids;
 }
 
 function recycleRetentionMs() {
@@ -257,7 +330,18 @@ async function loadState(basePath) {
   statePath = path.join(basePath, "meta", "state.json");
 
   try {
-    const raw = await fsp.readFile(statePath, "utf8");
+    let raw = "";
+    for (const candidatePath of [`${statePath}.shutdown`, statePath, `${statePath}.bak`]) {
+      try {
+        const candidate = await fsp.readFile(candidatePath, "utf8");
+        JSON.parse(candidate);
+        raw = candidate;
+        break;
+      } catch {
+        // Invalid or missing snapshots are ignored in favor of a valid copy.
+      }
+    }
+    if (!raw) throw new Error("No valid state snapshot");
     state = { ...structuredClone(DEFAULT_STATE), ...JSON.parse(raw) };
     state.settings = { ...DEFAULT_STATE.settings, ...state.settings };
   } catch {
@@ -266,8 +350,14 @@ async function loadState(basePath) {
 
   state.boardAssets = state.boardAssets || [];
   state.recycleBin = state.recycleBin || [];
+  state.groups = state.groups || [];
   state.notes = state.notes || [];
+  state.notePages = state.notePages || [];
   state.mindMaps = state.mindMaps || [];
+  state.assets = (state.assets || []).map((asset) => ({
+    ...asset,
+    folderIds: [...new Set(normalizeAssetFolders(asset).flatMap((folderId) => folderLineageIds(folderId)))]
+  }));
   state.settings.recycleRetentionDays = Number(state.settings.recycleRetentionDays || 7);
   const migratedBoardAssets = [];
   state.assets = state.assets.filter((asset) => {
@@ -284,14 +374,28 @@ async function loadState(basePath) {
   state.settings.importPath = path.join(basePath, "imports");
   await cleanupRecycleBin();
   await saveState();
+  await fsp.rm(`${statePath}.shutdown`, { force: true }).catch(() => {});
   startImportWatcher();
   return cloneState();
 }
 
 async function saveState() {
   if (!statePath) return;
-  await fsp.mkdir(path.dirname(statePath), { recursive: true });
-  await fsp.writeFile(statePath, JSON.stringify(state, null, 2), "utf8");
+  const targetPath = statePath;
+  const payload = JSON.stringify(state, null, 2);
+  const write = async () => {
+    await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+    const tempPath = `${targetPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    await fsp.writeFile(tempPath, payload, "utf8");
+    try {
+      await fsp.copyFile(targetPath, `${targetPath}.bak`);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    await fsp.rename(tempPath, targetPath);
+  };
+  stateWriteQueue = stateWriteQueue.then(write, write);
+  return stateWriteQueue;
 }
 
 async function cleanupRecycleBin() {
@@ -437,7 +541,10 @@ async function importFiles(filePaths) {
 
     const hash = await hashFile(sourcePath);
     const existing = state.assets.find((asset) => asset.hash === hash);
-    if (existing) continue;
+    if (existing) {
+      added.push(existing);
+      continue;
+    }
 
     const ext = path.extname(sourcePath).toLowerCase();
     const id = crypto.randomUUID();
@@ -474,7 +581,7 @@ async function importFiles(filePaths) {
   return added;
 }
 
-async function importImagePayloads(payloads) {
+async function importImagePayloads(payloads, shouldBroadcast = true) {
   if (!libraryPath) await loadState(getDefaultLibraryPath());
   const added = [];
 
@@ -498,7 +605,7 @@ async function importImagePayloads(payloads) {
     const asset = {
       id,
       name: payload.name || `粘贴图片-${new Date().toISOString().replace(/[:.]/g, "-")}${ext}`,
-      folderIds: targetFolderExists ? [payload.folderId] : [],
+      folderIds: targetFolderExists ? folderLineageIds(payload.folderId) : [],
       fileName,
       filePath: destPath,
       url: toFileUrl(destPath),
@@ -518,7 +625,7 @@ async function importImagePayloads(payloads) {
 
   if (added.length) {
     await saveState();
-    broadcastState();
+    if (shouldBroadcast) broadcastState();
   }
   return added;
 }
@@ -609,6 +716,16 @@ ipcMain.handle("assets:import-dialog", async () => {
 
 ipcMain.handle("assets:import-image-data", async (_event, payloads) => importImagePayloads(payloads));
 
+ipcMain.handle("note-pages:import-images", async (_event, noteId, payloads) => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  const note = (state.notePages || []).find((item) => item.id === noteId);
+  if (!note) return [];
+  const added = await importImagePayloads((payloads || []).map((payload) => ({ ...payload, boardOnly: true })), false);
+  note.assetIds = [...new Set([...(note.assetIds || []), ...added.map((asset) => asset.id)])];
+  await saveState();
+  return added;
+});
+
 ipcMain.handle("clipboard:write-asset-image", async (_event, assetId) => {
   if (!libraryPath) await loadState(getDefaultLibraryPath());
   const asset = getAnyAsset(assetId);
@@ -680,6 +797,10 @@ ipcMain.handle("assets:delete", async (_event, assetId) => {
     ...board,
     items: board.items.filter((item) => item.assetId !== assetId)
   }));
+  state.groups = (state.groups || []).map((group) => ({
+    ...group,
+    assetIds: (group.assetIds || []).filter((id) => id !== assetId)
+  }));
 
   await saveState();
   broadcastState();
@@ -727,9 +848,14 @@ ipcMain.handle("assets:set-folder-membership", async (_event, assetId, folderId,
   const targetFolderExists = state.folders.some((folder) => folder.id === folderId);
   if (!targetFolderExists) return cloneState();
   const folderIds = new Set(normalizeAssetFolders(asset));
-  if (inFolder) folderIds.add(folderId);
-  else folderIds.delete(folderId);
-  asset.folderIds = [...folderIds];
+  if (inFolder) folderLineageIds(folderId).forEach((id) => folderIds.add(id));
+  else {
+    folderIds.delete(folderId);
+    state.groups = (state.groups || []).map((group) => group.folderId === folderId
+      ? { ...group, assetIds: (group.assetIds || []).filter((id) => id !== assetId) }
+      : group);
+  }
+  asset.folderIds = [...new Set([...folderIds].flatMap((id) => folderLineageIds(id)))];
   delete asset.folderId;
   await saveState();
   return cloneState();
@@ -776,10 +902,152 @@ ipcMain.handle("folders:delete", async (_event, folderId) => {
     }
   }
   state.folders = state.folders.filter((item) => !idsToDelete.has(item.id));
+  state.groups = (state.groups || []).filter((group) => !idsToDelete.has(group.folderId));
   state.assets = state.assets.map((asset) => ({
     ...asset,
     folderIds: normalizeAssetFolders(asset).filter((id) => !idsToDelete.has(id))
   }));
+  await saveState();
+  broadcastState();
+  return cloneState();
+});
+
+ipcMain.handle("groups:create", async (_event, folderId, name = "") => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  if (!state.folders.some((folder) => folder.id === folderId)) return cloneState();
+  const folderGroups = (state.groups || []).filter((group) => group.folderId === folderId);
+  state.groups.unshift({
+    id: crypto.randomUUID(),
+    folderId,
+    name: String(name || "").trim() || `组 ${folderGroups.length + 1}`,
+    color: GROUP_COLORS[folderGroups.length % GROUP_COLORS.length],
+    collapsed: false,
+    assetIds: [],
+    createdAt: new Date().toISOString()
+  });
+  await saveState();
+  broadcastState();
+  return cloneState();
+});
+
+ipcMain.handle("groups:create-from-assets", async (_event, folderId, assetIds = [], name = "") => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  if (!state.folders.some((folder) => folder.id === folderId)) return null;
+  const validAssetIds = [...new Set(assetIds)].filter((assetId) => state.assets.some((asset) => asset.id === assetId));
+  if (validAssetIds.length < 2) return null;
+  const folderGroups = (state.groups || []).filter((group) => group.folderId === folderId);
+  state.groups = (state.groups || []).map((group) => group.folderId === folderId
+    ? { ...group, assetIds: (group.assetIds || []).filter((assetId) => !validAssetIds.includes(assetId)) }
+    : group);
+  const group = {
+    id: crypto.randomUUID(),
+    folderId,
+    name: String(name || "").trim() || `组 ${folderGroups.length + 1}`,
+    color: GROUP_COLORS[folderGroups.length % GROUP_COLORS.length],
+    collapsed: false,
+    assetIds: validAssetIds,
+    createdAt: new Date().toISOString()
+  };
+  state.groups.unshift(group);
+  state.assets.forEach((asset) => {
+    if (!validAssetIds.includes(asset.id)) return;
+    asset.folderIds = [...new Set([...normalizeAssetFolders(asset), ...folderLineageIds(folderId)])];
+    delete asset.folderId;
+  });
+  await saveState();
+  broadcastState();
+  return { state: cloneState(), groupId: group.id };
+});
+
+ipcMain.handle("groups:update", async (_event, groupId, patch = {}) => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  const group = (state.groups || []).find((item) => item.id === groupId);
+  if (!group) return cloneState();
+  if (Object.hasOwn(patch, "name")) {
+    const name = String(patch.name || "").trim();
+    if (name) group.name = name;
+  }
+  if (Object.hasOwn(patch, "color") && /^#[0-9a-f]{6}$/i.test(String(patch.color))) group.color = patch.color;
+  if (Object.hasOwn(patch, "collapsed")) group.collapsed = Boolean(patch.collapsed);
+  await saveState();
+  broadcastState();
+  return cloneState();
+});
+
+ipcMain.handle("groups:delete", async (_event, groupId) => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  state.groups = (state.groups || []).filter((group) => group.id !== groupId);
+  await saveState();
+  broadcastState();
+  return cloneState();
+});
+
+ipcMain.handle("groups:set-asset", async (_event, folderId, assetId, groupId = "") => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  const asset = state.assets.find((item) => item.id === assetId);
+  if (!asset || !state.folders.some((folder) => folder.id === folderId)) return cloneState();
+  const target = groupId
+    ? (state.groups || []).find((group) => group.id === groupId && group.folderId === folderId)
+    : null;
+  state.groups = (state.groups || []).map((group) => group.folderId === folderId
+    ? { ...group, assetIds: (group.assetIds || []).filter((id) => id !== assetId) }
+    : group);
+  if (target) {
+    const refreshedTarget = state.groups.find((group) => group.id === target.id);
+    refreshedTarget.assetIds.push(assetId);
+    asset.folderIds = [...new Set([...normalizeAssetFolders(asset), ...folderLineageIds(folderId)])];
+    delete asset.folderId;
+  }
+  await saveState();
+  broadcastState();
+  return cloneState();
+});
+
+ipcMain.handle("note-pages:create", async () => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  const note = {
+    id: crypto.randomUUID(),
+    title: `笔记 ${(state.notePages || []).length + 1}`,
+    text: "",
+    content: "",
+    paper: "plain",
+    fontFamily: "Microsoft YaHei",
+    fontSize: 18,
+    color: "#3a2d2b",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  state.notePages.unshift(note);
+  await saveState();
+  broadcastState();
+  return { state: cloneState(), noteId: note.id };
+});
+
+ipcMain.handle("note-pages:update", async (_event, noteId, patch = {}) => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  const note = (state.notePages || []).find((item) => item.id === noteId);
+  if (!note) return cloneState();
+  const allowed = ["title", "text", "content", "paper", "fontFamily", "fontSize", "color"];
+  for (const key of allowed) {
+    if (Object.hasOwn(patch, key)) note[key] = patch[key];
+  }
+  note.fontSize = Math.max(12, Math.min(72, Number(note.fontSize) || 18));
+  note.updatedAt = new Date().toISOString();
+  await saveState();
+  return cloneState();
+});
+
+ipcMain.handle("note-pages:delete", async (_event, noteId) => {
+  if (!libraryPath) await loadState(getDefaultLibraryPath());
+  const deletedNote = (state.notePages || []).find((note) => note.id === noteId);
+  state.notePages = (state.notePages || []).filter((note) => note.id !== noteId);
+  const candidateIds = new Set(deletedNote?.assetIds || []);
+  const retainedByNotes = new Set((state.notePages || []).flatMap((note) => note.assetIds || []));
+  const retainedByBoards = new Set((state.boards || []).flatMap((board) => (board.items || []).map((item) => item.assetId)));
+  const removableIds = new Set([...candidateIds].filter((id) => !retainedByNotes.has(id) && !retainedByBoards.has(id)));
+  const removableAssets = (state.boardAssets || []).filter((asset) => removableIds.has(asset.id));
+  state.boardAssets = (state.boardAssets || []).filter((asset) => !removableIds.has(asset.id));
+  await Promise.all(removableAssets.map((asset) => fsp.unlink(asset.filePath).catch(() => {})));
   await saveState();
   broadcastState();
   return cloneState();
@@ -856,26 +1124,41 @@ ipcMain.handle("window:set-theme", async (_event, themeName) => {
   return true;
 });
 
-ipcMain.handle("boards:save", async (_event, board) => {
+async function persistBoards(boards) {
   if (!libraryPath) await loadState(getDefaultLibraryPath());
-  const index = state.boards.findIndex((item) => item.id === board.id);
-  if (index === -1) return cloneState();
-  state.boards[index] = board;
-  const referencedBoardAssetIds = new Set(
-    state.boards.flatMap((item) => item.items.map((boardItem) => boardItem.assetId))
-  );
-  const orphanedBoardAssets = state.boardAssets.filter((asset) => !referencedBoardAssetIds.has(asset.id));
-  for (const asset of orphanedBoardAssets) {
-    const assetsDir = path.resolve(libraryPath || getDefaultLibraryPath(), "assets");
-    const assetPath = path.resolve(asset.filePath);
-    if (assetPath.startsWith(assetsDir + path.sep)) {
-      await fsp.rm(assetPath, { force: true }).catch(() => {});
-    }
-  }
-  state.boardAssets = state.boardAssets.filter((asset) => referencedBoardAssetIds.has(asset.id));
+  mergeBoardsIntoState(boards);
   await saveState();
   broadcastState();
   return cloneState();
+}
+
+function mergeBoardsIntoState(boards) {
+  for (const board of boards) {
+    if (!board?.id || !Array.isArray(board.items)) continue;
+    const index = state.boards.findIndex((item) => item.id === board.id);
+    if (index !== -1) state.boards[index] = board;
+  }
+}
+
+ipcMain.handle("boards:save", async (_event, board) => {
+  return persistBoards([board]);
+});
+
+ipcMain.handle("boards:save-many", async (_event, boards = []) => {
+  return persistBoards(Array.isArray(boards) ? boards : []);
+});
+
+ipcMain.on("boards:flush-sync", (event, boards = []) => {
+  try {
+    mergeBoardsIntoState(Array.isArray(boards) ? boards : []);
+    if (statePath) {
+      fs.mkdirSync(path.dirname(statePath), { recursive: true });
+      fs.writeFileSync(`${statePath}.shutdown`, JSON.stringify(state, null, 2), "utf8");
+    }
+    event.returnValue = true;
+  } catch {
+    event.returnValue = false;
+  }
 });
 
 ipcMain.handle("annotations:save", async (_event, assetId, annotations) => {

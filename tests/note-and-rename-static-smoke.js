@@ -8,6 +8,9 @@ const main = fs.readFileSync(path.join(root, "src", "main.js"), "utf8");
 const preload = fs.readFileSync(path.join(root, "src", "preload.js"), "utf8");
 
 const checks = {
+  viewerHandTool: renderer.includes('state.tool === "hand" && event.button === 0')
+    && renderer.includes('els.imagePlane.setPointerCapture?.(event.pointerId)')
+    && styles.includes('.viewer.hand-tool #annotationCanvas'),
   viewerBlankClickCloses: renderer.includes('if (event.target === els.viewerBody) closeViewer();'),
   blankClickRenameCommit: renderer.includes('document.addEventListener("pointerdown", commitInlineRenameBeforePointerAction, true)'),
   fixedDocumentMarkup: renderer.includes('contenteditable="true"') && !renderer.includes('data-note-resize="${escapeHtml(note.id)}"'),

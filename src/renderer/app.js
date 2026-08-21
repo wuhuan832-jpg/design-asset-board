@@ -57,6 +57,7 @@ const state = {
   viewerZoom: 1,
   viewerPan: { x: 0, y: 0 },
   viewerDragging: false,
+  viewerDragPointerId: null,
   viewerDragStart: { x: 0, y: 0 },
   tool: "pen",
   folderPopoverAssetId: "",
@@ -1408,6 +1409,7 @@ function drawShape(ctx, shape) {
 function setTool(tool) {
   state.tool = tool;
   document.querySelectorAll(".tool").forEach((button) => button.classList.toggle("active", button.dataset.tool === tool));
+  els.viewer.classList.toggle("hand-tool", tool === "hand");
 }
 
 async function finishShape() {
@@ -2645,9 +2647,14 @@ els.viewer.addEventListener("wheel", (event) => {
 
 els.imagePlane.addEventListener("pointerdown", async (event) => {
   if (!state.viewerAssetId) return;
-  if (event.button === 1 || event.altKey || event.target === els.viewerImage) {
+  const handDrag = state.tool === "hand" && event.button === 0;
+  if (handDrag || event.button === 1 || event.altKey) {
+    event.preventDefault();
     state.viewerDragging = true;
+    state.viewerDragPointerId = event.pointerId;
     state.viewerDragStart = { x: event.clientX - state.viewerPan.x, y: event.clientY - state.viewerPan.y };
+    els.imagePlane.classList.add("dragging");
+    els.imagePlane.setPointerCapture?.(event.pointerId);
     return;
   }
   return;
@@ -2692,6 +2699,7 @@ els.imagePlane.addEventListener("pointerdown", async (event) => {
 
 window.addEventListener("pointermove", (event) => {
   if (state.viewerDragging) {
+    if (state.viewerDragPointerId !== event.pointerId) return;
     state.viewerPan = { x: event.clientX - state.viewerDragStart.x, y: event.clientY - state.viewerDragStart.y };
     applyViewerTransform();
     return;
@@ -2710,10 +2718,22 @@ window.addEventListener("pointermove", (event) => {
   drawAnnotations();
 });
 
-window.addEventListener("pointerup", async () => {
+window.addEventListener("pointerup", async (event) => {
+  if (state.viewerDragging && state.viewerDragPointerId === event.pointerId) {
+    els.imagePlane.classList.remove("dragging");
+    if (els.imagePlane.hasPointerCapture?.(event.pointerId)) els.imagePlane.releasePointerCapture(event.pointerId);
+    state.viewerDragPointerId = null;
+  }
   state.viewerDragging = false;
   if (state.drawing) await finishShape();
   state.drawing = false;
+});
+
+window.addEventListener("pointercancel", (event) => {
+  if (state.viewerDragPointerId !== event.pointerId) return;
+  els.imagePlane.classList.remove("dragging");
+  state.viewerDragging = false;
+  state.viewerDragPointerId = null;
 });
 
 window.addEventListener("keydown", async (event) => {

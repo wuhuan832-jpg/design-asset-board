@@ -1109,6 +1109,14 @@ dd {
   cursor: crosshair;
 }
 
+.viewer.hand-tool #annotationCanvas {
+  cursor: grab;
+}
+
+.viewer.hand-tool .image-plane.dragging #annotationCanvas {
+  cursor: grabbing;
+}
+
 .annotation-tools {
   grid-column: 2;
   z-index: 3;

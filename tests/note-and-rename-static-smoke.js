@@ -8,6 +8,7 @@ const main = fs.readFileSync(path.join(root, "src", "main.js"), "utf8");
 const preload = fs.readFileSync(path.join(root, "src", "preload.js"), "utf8");
 
 const checks = {
+  viewerBlankClickCloses: renderer.includes('if (event.target === els.viewerBody) closeViewer();'),
   blankClickRenameCommit: renderer.includes('document.addEventListener("pointerdown", commitInlineRenameBeforePointerAction, true)'),
   fixedDocumentMarkup: renderer.includes('contenteditable="true"') && !renderer.includes('data-note-resize="${escapeHtml(note.id)}"'),
   fixedDocumentSize: /\.note-page\s*\{[\s\S]*?width:\s*720px;[\s\S]*?height:\s*900px;/.test(styles),

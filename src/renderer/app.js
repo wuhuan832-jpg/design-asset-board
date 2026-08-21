@@ -27,6 +27,7 @@ const els = {
   folderContextMenu: document.querySelector("#folderContextMenu"),
   boardContextMenu: document.querySelector("#boardContextMenu"),
   viewer: document.querySelector("#viewer"),
+  viewerBody: document.querySelector(".viewer-body"),
   closeViewerBtn: document.querySelector("#closeViewerBtn"),
   viewerImage: document.querySelector("#viewerImage"),
   imagePlane: document.querySelector("#imagePlane"),
@@ -1661,6 +1662,9 @@ els.newBoardBtn.addEventListener("click", createBoard);
 els.searchInput.addEventListener("input", render);
 els.sortSelect.addEventListener("change", render);
 els.closeViewerBtn.addEventListener("click", closeViewer);
+els.viewerBody.addEventListener("click", (event) => {
+  if (event.target === els.viewerBody) closeViewer();
+});
 els.fitBtn.addEventListener("click", fitViewer);
 els.actualBtn.addEventListener("click", actualViewer);
 els.prevBtn.addEventListener("click", () => goViewer(-1));

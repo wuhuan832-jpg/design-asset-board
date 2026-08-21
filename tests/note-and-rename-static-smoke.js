@@ -10,6 +10,8 @@ const preload = fs.readFileSync(path.join(root, "src", "preload.js"), "utf8");
 const checks = {
   viewerHandTool: renderer.includes('state.tool === "hand" && event.button === 0')
     && renderer.includes('els.imagePlane.setPointerCapture?.(event.pointerId)')
+    && renderer.includes('setTool("hand");')
+    && renderer.includes('tool: "hand"')
     && styles.includes('.viewer.hand-tool #annotationCanvas'),
   viewerBlankClickCloses: renderer.includes('if (event.target === els.viewerBody) closeViewer();'),
   blankClickRenameCommit: renderer.includes('document.addEventListener("pointerdown", commitInlineRenameBeforePointerAction, true)'),

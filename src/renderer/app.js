@@ -59,7 +59,7 @@ const state = {
   viewerDragging: false,
   viewerDragPointerId: null,
   viewerDragStart: { x: 0, y: 0 },
-  tool: "pen",
+  tool: "hand",
   folderPopoverAssetId: "",
   expandedFolderIds: new Set(),
   renamingFolderId: "",
@@ -1258,6 +1258,7 @@ async function createBoard() {
 function openViewer(assetId) {
   const asset = getAsset(assetId);
   if (!asset) return;
+  setTool("hand");
   state.viewerAssetId = assetId;
   state.viewerZoom = 1;
   state.viewerPan = { x: 0, y: 0 };

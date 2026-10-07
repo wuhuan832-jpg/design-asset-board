@@ -125,6 +125,23 @@ function boardItemSize(board, item) {
   return { width, height: Math.max(40, Math.round(width * aspect)) };
 }
 
+function getVisibleBoardItems(board, viewportWidth, viewportHeight, overscan = 1200) {
+  if (!board?.items?.length) return [];
+  const scale = Math.max(0.01, Number(board.viewport?.scale) || 1);
+  const offsetX = Number(board.viewport?.x) || 0;
+  const offsetY = Number(board.viewport?.y) || 0;
+  return board.items.filter((item) => {
+    const size = boardItemSize(board, item);
+    const x = numberOr(item.x) * scale + offsetX;
+    const y = numberOr(item.y) * scale + offsetY;
+    const extent = Math.max(size.width, size.height) * scale;
+    return x + extent >= -overscan
+      && y + extent >= -overscan
+      && x - extent <= viewportWidth + overscan
+      && y - extent <= viewportHeight + overscan;
+  });
+}
+
 function setBoardSelection(ids) {
   const unique = [...new Set(ids.filter(Boolean))];
   state.selectedBoardItemIds = unique;
@@ -259,7 +276,8 @@ function render() {
     : state.selectedBoardItemId
       ? [state.selectedBoardItemId]
       : [];
-  els.canvas.innerHTML = board.items.map((item) => {
+  const visibleItems = getVisibleBoardItems(board, els.area.clientWidth, els.area.clientHeight);
+  els.canvas.innerHTML = visibleItems.map((item) => {
     const isText = item.type === "text";
     const asset = isText ? null : getAsset(item.assetId);
     if (!isText && !asset) return "";
@@ -274,7 +292,7 @@ function render() {
         <div class="board-item-inner" style="transform: scale(${flipX}, ${flipY});">
           ${isText
             ? `<div class="board-text-content">${escapeHtml(item.text || "文字")}</div>`
-            : `<img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />`}
+            : `<img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" loading="lazy" decoding="async" />`}
         </div>
         ${singleSelected && !isText ? `<button class="rotate-handle" data-board-handle="rotate"></button>
           <button class="resize-handle" data-board-handle="resize"></button>

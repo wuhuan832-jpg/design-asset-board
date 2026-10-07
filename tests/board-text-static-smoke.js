@@ -15,6 +15,8 @@ const checks = {
   textIsRenderedOnBothBoards: [mainRenderer, floatingRenderer].every((source) => source.includes("board-text-content")),
   inputIsTemporary: [mainRenderer, floatingRenderer].every((source) => source.includes("board-text-entry") && source.includes('event.key === "Escape"')),
   textStylesExist: styles.includes(".board-text-content") && styles.includes(".board-text-entry"),
+  boardViewportCulling: [mainRenderer, floatingRenderer].every((source) => source.includes("getVisibleBoardItems"))
+    && [mainRenderer, floatingRenderer].every((source) => source.includes('decoding="async"')),
   boardPersistenceKeepsFullItem: mainProcess.includes("state.boards[index] = board")
 };
 

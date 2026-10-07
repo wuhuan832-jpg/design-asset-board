@@ -376,6 +376,23 @@ function boardItemSize(board, item) {
   return { width, height: Math.max(40, Math.round(width * aspect)) };
 }
 
+function getVisibleBoardItems(board, viewportWidth, viewportHeight, overscan = 1200) {
+  if (!board?.items?.length) return [];
+  const scale = Math.max(0.01, Number(board.viewport?.scale) || 1);
+  const offsetX = Number(board.viewport?.x) || 0;
+  const offsetY = Number(board.viewport?.y) || 0;
+  return board.items.filter((item) => {
+    const size = boardItemSize(board, item);
+    const x = (Number(item.x) || 0) * scale + offsetX;
+    const y = (Number(item.y) || 0) * scale + offsetY;
+    const extent = Math.max(size.width, size.height) * scale;
+    return x + extent >= -overscan
+      && y + extent >= -overscan
+      && x - extent <= viewportWidth + overscan
+      && y - extent <= viewportHeight + overscan;
+  });
+}
+
 function setInternalBoardSelection(ids) {
   const unique = [...new Set(ids.filter(Boolean))];
   state.selectedInternalBoardItemIds = unique;
@@ -1046,11 +1063,12 @@ function renderInternalBoards() {
     return;
   }
 
+  const visibleItems = getVisibleBoardItems(board, els.boardDesktop.clientWidth, els.boardDesktop.clientHeight);
   els.boardDesktop.innerHTML = `
     <section class="internal-board-window active" data-internal-board="${escapeHtml(board.id)}">
       <div class="internal-board-area" data-board-area="${escapeHtml(board.id)}">
         <div class="board-canvas" style="transform: translate(${board.viewport.x}px, ${board.viewport.y}px) scale(${board.viewport.scale});">
-          ${board.items.map((item) => renderBoardItem(item, board.id)).join("")}
+          ${visibleItems.map((item) => renderBoardItem(item, board.id)).join("")}
         </div>
         ${renderBoardSelectionBox(board)}
       </div>
@@ -1077,7 +1095,7 @@ function renderBoardItem(item, boardId) {
       <div class="board-item-inner" style="transform: scale(${flipX}, ${flipY});">
         ${isText
           ? `<div class="board-text-content">${escapeHtml(item.text || "文字")}</div>`
-          : `<img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" />`}
+          : `<img src="${escapeHtml(asset.url)}" alt="${escapeHtml(asset.name)}" draggable="false" loading="lazy" decoding="async" />`}
       </div>
       ${singleSelected && !isText ? `<button class="rotate-handle" data-board-handle="rotate"></button>
         <button class="resize-handle" data-board-handle="resize"></button>

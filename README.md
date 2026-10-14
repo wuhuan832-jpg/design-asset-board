@@ -13,6 +13,10 @@
 
 ## 启动
 
+普通用户可从 [Releases](https://github.com/wuhuan832-jpg/design-asset-board/releases/latest) 下载 Windows 安装包。
+
+开发者可以从源码启动：
+
 ```bash
 npm install
 npm start

@@ -1,4 +1,5 @@
 const path = require("path");
+const fs = require("fs");
 const { spawn, execFileSync } = require("child_process");
 
 const root = path.resolve(__dirname, "..");
@@ -52,14 +53,30 @@ async function connect() {
 }
 
 async function main() {
-  const args = isPackaged ? [`--remote-debugging-port=${port}`] : [`--remote-debugging-port=${port}`, "."];
+  if (isPackaged) fs.mkdirSync(path.join(root, ".package-smoke-data"), { recursive: true });
+  const testUserData = isPackaged
+    ? fs.mkdtempSync(path.join(root, ".package-smoke-data", "board-open-"))
+    : "";
+  const args = isPackaged
+    ? [`--remote-debugging-port=${port}`, `--user-data-dir=${testUserData}`]
+    : [`--remote-debugging-port=${port}`, "."];
   const child = spawn(executable, args, { cwd: root, stdio: "ignore", windowsHide: true });
   const client = await connect();
   try {
     const response = await client.evaluate(`(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      const boards = state.library.boards.filter((entry) => Array.isArray(entry.items));
-      if (!boards.length) throw new Error("No board available");
+      for (let attempt = 0; attempt < 200 && !state.library.settings.libraryPath; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!state.library.settings.libraryPath) throw new Error("Library initialization timed out");
+      let boards = state.library.boards.filter((entry) => Array.isArray(entry.items));
+      let temporaryBoardId = "";
+      if (!boards.length) {
+        const nextState = await api.createBoard("__BOARD_OPEN_SMOKE__");
+        setLibrary(nextState);
+        boards = state.library.boards.filter((entry) => Array.isArray(entry.items));
+        temporaryBoardId = boards.find((entry) => entry.name === "__BOARD_OPEN_SMOKE__")?.id || "";
+      }
+      if (!boards.length) throw new Error("Could not create a board for the smoke test");
       const opened = [];
       for (const board of boards) {
         const link = document.querySelector('[data-board="' + CSS.escape(board.id) + '"]');
@@ -80,7 +97,7 @@ async function main() {
       const canvas = area?.querySelector(".board-canvas");
       const dockRect = dock?.getBoundingClientRect();
       const areaRect = area?.getBoundingClientRect();
-      return {
+      const result = {
         boardId: board.id,
         workspaceMode: state.workspaceMode,
         activeBoardId: state.activeBoardId,
@@ -92,8 +109,11 @@ async function main() {
         tabCount: document.querySelectorAll("[data-board-tab]").length,
         renderedItems: canvas?.querySelectorAll("[data-board-item]").length || 0,
         sourceItems: board.items.length,
-        opened
+        opened,
+        usedTemporaryBoard: Boolean(temporaryBoardId)
       };
+      if (temporaryBoardId) setLibrary(await api.deleteBoard(temporaryBoardId));
+      return result;
     })()`);
     if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
     const result = response.result.value;
